@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vibecast": {
+      "command": "sh",
+      "args": ["-c", "exec \"${VIBECAST_BIN:-${CLAUDE_PLUGIN_ROOT}/../vibecast}\" mcp serve"]
+    }
+  }
+}

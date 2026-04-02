@@ -1,0 +1,13 @@
+{
+  "name": "@agentics-live/darwin-arm64",
+  "version": "0.1.0",
+  "description": "vibecast native binary for darwin arm64",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "license": "MIT",
+  "preferUnplugged": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pksorensen/vibecast"
+  }
+}
