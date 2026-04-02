@@ -94,6 +94,27 @@ vibecast fkeybar            Internal: render F-key bar pane
 vibecast sync               Sync session state
 ```
 
+## Assembly Line Protocol (ALP)
+
+vibecast is the reference **Operator** implementation of the [Assembly Line Protocol](https://agentics.dk/alp).
+
+ALP defines a four-layer architecture for running AI agents safely in production. Each layer has a clearly scoped role:
+
+| Layer | Role | Implementation |
+|---|---|---|
+| **Server** | Task queue — where work enters the system | [agentics.dk](https://agentics.dk) |
+| **Runner** | Deterministic orchestrator — pulls tasks, controls execution | [pks-cli](https://github.com/pksorensen/pks-cli) (C#, open source) |
+| **Operator** | Drives the agent — the last guardrail before non-deterministic execution | **vibecast** (this repo) |
+| **Agent** | Executes the work — Claude Code, Codex, Copilot CLI, etc. | Claude Code |
+
+vibecast currently targets Claude Code only. The Operator role in ALP is deliberately pluggable — anyone can implement an Operator for a different agent by following the spec.
+
+**Further reading:**
+- [ALP Operator spec](https://agentics.dk/alp/operator) — protocol details, capability declarations, trust boundaries
+- [Security by Design: How the Assembly Line Protocol Keeps AI Agents Safe](https://agentics.dk/blog/alp-security-by-design) — the four layers explained, and why the architecture makes agents safe
+
+---
+
 ## Claude Code Plugin
 
 When you start a broadcast, vibecast automatically installs a Claude Code plugin (`claude-plugin/`) that wires up hooks for:
@@ -106,4 +127,17 @@ This is what lets viewers see live status updates — not just the raw terminal 
 
 ## License
 
-MIT
+vibecast is licensed under the [Business Source License 1.1](LICENSE) (BUSL 1.1).
+
+**Free for:**
+- Broadcasting your own coding sessions (personal or professional)
+- Self-hosting the server for your own team
+- Contributing modifications back to this repo
+- Any internal or non-competing use
+
+**Requires a commercial license:**
+- Building a hosted terminal broadcasting platform or live agentic coding service that competes with agentics.dk
+
+After four years from each version's release, that version automatically converts to the Apache 2.0 license.
+
+For commercial licensing enquiries: https://github.com/pksorensen/vibecast
