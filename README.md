@@ -1,3 +1,5 @@
+![vibecast](image.jpg)
+
 # vibecast
 
 Broadcast your agentic coding session live to the web — powered by Claude Code.
