@@ -52,6 +52,11 @@ func buildPluginFlags() string {
 }
 
 func buildAppendSystemPromptFlag() string {
+	// Prefer file-based approach to avoid shell quoting issues with special chars/JSON
+	if file := os.Getenv("VIBECAST_APPEND_SYSTEM_PROMPT_FILE"); file != "" {
+		escapedPath := strings.ReplaceAll(file, "'", "'\"'\"'")
+		return " --append-system-prompt \"$(cat '" + escapedPath + "')\""
+	}
 	if prompt := os.Getenv("VIBECAST_APPEND_SYSTEM_PROMPT"); prompt != "" {
 		// Shell-escape single quotes in the prompt value
 		escaped := strings.ReplaceAll(prompt, "'", "'\"'\"'")
@@ -435,6 +440,9 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		if vasp := os.Getenv("VIBECAST_APPEND_SYSTEM_PROMPT"); vasp != "" {
 			exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_APPEND_SYSTEM_PROMPT", vasp).Run()
 		}
+		if vaspf := os.Getenv("VIBECAST_APPEND_SYSTEM_PROMPT_FILE"); vaspf != "" {
+			exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_APPEND_SYSTEM_PROMPT_FILE", vaspf).Run()
+		}
 		if ipf := os.Getenv("VIBECAST_INITIAL_PROMPT_FILE"); ipf != "" {
 			exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_INITIAL_PROMPT_FILE", ipf).Run()
 		}
@@ -448,6 +456,8 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 			"AGENTICS_OWNER",
 			"AGENTICS_PROJECT_NAME",
 			"AGENTICS_JOB_MODE",
+			"AGENTICS_AUTO_GIT",
+			"AGENTICS_COMMIT_MESSAGE_HINT",
 		} {
 			if val := os.Getenv(key); val != "" {
 				exec.Command("tmux", "set-environment", "-t", sessionName, key, val).Run()

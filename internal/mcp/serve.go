@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -314,21 +315,65 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 			json.Unmarshal(params.Arguments, &args)
 		}
 
-		// Auto-git: refuse to stop if uncommitted changes exist
+		// Auto-git: refuse to stop if uncommitted changes exist.
+		// Excludes .claude/ — those are job-scoped config files written by the runner,
+		// not work product. They must not be committed to the repository.
 		if os.Getenv("AGENTICS_AUTO_GIT") == "1" {
 			cwd, _ := os.Getwd()
 			out, err := execCommand("git", "-C", cwd, "status", "--porcelain")
-			if err == nil && len(strings.TrimSpace(out)) > 0 {
-				hint := os.Getenv("AGENTICS_COMMIT_MESSAGE_HINT")
-				if hint == "" {
-					hint = "Use semantic commits: feat(scope): description"
+			if err == nil {
+				var workLines []string
+				for _, line := range strings.Split(out, "\n") {
+					// Strip leading status chars and spaces to get the path
+					path := strings.TrimSpace(line)
+					if len(path) >= 3 {
+						path = strings.TrimSpace(path[2:])
+					}
+					if path == "" || strings.HasPrefix(path, ".claude/") {
+						continue
+					}
+					workLines = append(workLines, line)
 				}
-				resultText = fmt.Sprintf(
-					"Cannot end session: uncommitted changes detected.\n\nCommit your work first.\nCommit message guidance: %s\n\nUncommitted files:\n%s",
-					hint, strings.TrimSpace(out),
-				)
-				isError = true
-				break
+				if len(workLines) > 0 {
+					hint := os.Getenv("AGENTICS_COMMIT_MESSAGE_HINT")
+					if hint == "" {
+						hint = "Use semantic commits: feat(scope): description"
+					}
+					resultText = fmt.Sprintf(
+						"Cannot end session: uncommitted changes detected.\n\nCommit your work first. Do NOT commit files under .claude/ — those are job-scoped config files.\nCommit message guidance: %s\n\nUncommitted files:\n%s",
+						hint, strings.Join(workLines, "\n"),
+					)
+					isError = true
+					break
+				}
+			}
+		}
+
+		// Check if background agents are still running via tmux pane capture.
+		// Claude Code shows "N local agents" in the status bar when subagents are active.
+		if tmuxPane := os.Getenv("TMUX_PANE"); tmuxPane != "" {
+			if out, err := exec.Command("tmux", "capture-pane", "-p", "-t", tmuxPane).Output(); err == nil {
+				if matched, _ := regexp.MatchString(`\d+ local agents`, string(out)); matched {
+					resultText = "Cannot end session: background agents are still running.\n\nRun this bash command to wait for them to finish, then call stop_broadcast again:\n  bash -c 'while tmux capture-pane -p -t $TMUX_PANE 2>/dev/null | grep -qE \"[0-9]+ local agents\"; do sleep 15; done'\n\nDo NOT retry stop_broadcast immediately — wait for agents to finish first."
+					isError = true
+					break
+				}
+			}
+		}
+
+		// Auto-git: push committed work back to origin so it lands in the project repo.
+		if os.Getenv("AGENTICS_AUTO_GIT") == "1" {
+			cwd, _ := os.Getwd()
+			branch := "main"
+			if out, err := execCommand("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
+				if b := strings.TrimSpace(out); b != "" && b != "HEAD" {
+					branch = b
+				}
+			}
+			pushCmd := exec.Command("git", "-C", cwd, "push", "origin", branch)
+			if pushOut, err := pushCmd.CombinedOutput(); err != nil {
+				// Non-fatal: log the push failure as a warning but don't block stop_broadcast
+				fmt.Fprintf(os.Stderr, "auto-git: push failed: %v\n%s\n", err, string(pushOut))
 			}
 		}
 

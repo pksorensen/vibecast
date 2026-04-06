@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -30,7 +31,7 @@ import (
 // HandleHookCommand dispatches to the appropriate hook handler.
 func HandleHookCommand(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "usage: vibecast hook <prompt|session|tool|post-tool|subagent-start|subagent-stop|stop>\n")
+		fmt.Fprintf(os.Stderr, "usage: vibecast hook <prompt|session|tool|post-tool|subagent-start|subagent-stop|stop|permission-request>\n")
 		os.Exit(1)
 	}
 
@@ -54,8 +55,10 @@ func HandleHookCommand(args []string) {
 		handleHookSubagentStop()
 	case "stop":
 		handleHookStop()
+	case "permission-request":
+		handleHookPermissionRequest()
 	default:
-		fmt.Fprintf(os.Stderr, "usage: vibecast hook <prompt|session|tool|post-tool|subagent-start|subagent-stop|stop>\n")
+		fmt.Fprintf(os.Stderr, "usage: vibecast hook <prompt|session|tool|post-tool|subagent-start|subagent-stop|stop|permission-request>\n")
 		os.Exit(1)
 	}
 }
@@ -620,6 +623,24 @@ func handleHookStop() {
 	// Only active when AGENTICS_JOB_MODE=1 (set by pks-cli job runner).
 	// Regular interactive users (npx vibecast) are unaffected.
 	if os.Getenv("AGENTICS_JOB_MODE") == "1" {
+		// Check if background agents are still running.
+		// Sleep 60s before blocking — the tmux pane won't update while the hook is
+		// blocking Claude, so we give agents time to finish between hook invocations.
+		if tmuxPane := os.Getenv("TMUX_PANE"); tmuxPane != "" {
+			if out, err := exec.Command("tmux", "capture-pane", "-p", "-t", tmuxPane).Output(); err == nil {
+				if matched, _ := regexp.MatchString(`\d+ local agents`, string(out)); matched {
+					time.Sleep(60 * time.Second)
+					reason := "Background agents are still running. Waiting for them to complete."
+					output, _ := json.Marshal(map[string]interface{}{
+						"decision": "block",
+						"reason":   reason,
+					})
+					os.Stdout.Write(output)
+					os.Exit(2)
+				}
+			}
+		}
+
 		sockPath := control.ControlSocketPath()
 		statusBody, err := control.ControlHTTPRequest(sockPath, "GET", "/status")
 		if err == nil {
@@ -656,6 +677,66 @@ func handleHookStop() {
 		}
 	}
 
+	os.Exit(0)
+}
+
+func handleHookPermissionRequest() {
+	stdinData, sf, _, _, _ := hookReadStdinAndFindSession()
+
+	var hookInput struct {
+		ToolName              string          `json:"tool_name"`
+		ToolInput             json.RawMessage `json:"tool_input"`
+		ToolUseID             string          `json:"tool_use_id"`
+		PermissionSuggestions json.RawMessage `json:"permission_suggestions"`
+	}
+	if err := json.Unmarshal(stdinData, &hookInput); err != nil {
+		os.Exit(0)
+	}
+
+	var toolInput interface{}
+	if len(hookInput.ToolInput) > 0 {
+		json.Unmarshal(hookInput.ToolInput, &toolInput)
+	}
+
+	// Build a short label for the vote question (e.g. "Write(.claude/agents/foo.md)")
+	question := hookInput.ToolName
+	if ti, ok := toolInput.(map[string]interface{}); ok {
+		for _, k := range []string{"file_path", "path", "command"} {
+			if v, ok := ti[k].(string); ok && v != "" {
+				question = hookInput.ToolName + "(" + v + ")"
+				break
+			}
+		}
+	}
+
+	util.DebugLog("[permission-request] toolName=%s toolUseId=%s streamId=%s question=%s", hookInput.ToolName, hookInput.ToolUseID, sf.StreamID, question)
+
+	// Answering AskUserQuestion / AskFollowupQuestion is the implicit approval — there is
+	// nothing for the team to vote on. Skip posting to avoid cluttering the chat.
+	if hookInput.ToolName == "AskUserQuestion" || hookInput.ToolName == "AskFollowupQuestion" {
+		os.Exit(0)
+	}
+
+	// Post to metadata — this creates the vote record and broadcasts a vote card to chat.
+	// The runner (pks-cli) polls for the resolved vote and answers via tmux send-keys,
+	// the same way it handles AskUserQuestion.
+	p := map[string]interface{}{
+		"streamId":  sf.StreamID,
+		"type":      "metadata",
+		"subtype":   "permission_request",
+		"toolName":  hookInput.ToolName,
+		"toolInput": toolInput,
+		"toolUseId": hookInput.ToolUseID,
+		"question":  question,
+		"timestamp": time.Now().Unix(),
+	}
+	if len(hookInput.PermissionSuggestions) > 0 {
+		var ps interface{}
+		json.Unmarshal(hookInput.PermissionSuggestions, &ps)
+		p["permissionSuggestions"] = ps
+	}
+	payload, _ := json.Marshal(p)
+	HookPostMetadata(sf, payload)
 	os.Exit(0)
 }
 

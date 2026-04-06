@@ -83,6 +83,18 @@
           }
         ]
       }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${VIBECAST_BIN:-${CLAUDE_PLUGIN_ROOT}/../vibecast} hook permission-request",
+            "async": true
+          }
+        ]
+      }
     ]
   }
 }
