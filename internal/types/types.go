@@ -170,10 +170,11 @@ type ChatMsgReceived struct{ Msg ChatMsg }
 type ClaudeRestartedMsg struct{ Err error }
 type ControlRestartMsg struct{}
 type ControlStopMsg struct {
-	Message    string
-	Conclusion string
-	GitCommit  string
-	GitBranch  string
+	Message      string
+	Conclusion   string
+	GitCommit    string
+	GitBranch    string
+	GitPushError string
 }
 type ControlServerChangedMsg struct{ URL string }
 type ImageQueuedMsg struct{ Img PendingImage }

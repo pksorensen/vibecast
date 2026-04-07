@@ -362,6 +362,7 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 		}
 
 		// Auto-git: push committed work back to origin so it lands in the project repo.
+		var gitPushError string
 		if os.Getenv("AGENTICS_AUTO_GIT") == "1" {
 			cwd, _ := os.Getwd()
 			branch := "main"
@@ -372,8 +373,10 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 			}
 			pushCmd := exec.Command("git", "-C", cwd, "push", "origin", branch)
 			if pushOut, err := pushCmd.CombinedOutput(); err != nil {
-				// Non-fatal: log the push failure as a warning but don't block stop_broadcast
-				fmt.Fprintf(os.Stderr, "auto-git: push failed: %v\n%s\n", err, string(pushOut))
+				gitPushError = fmt.Sprintf("push failed: %v\n%s", err, strings.TrimSpace(string(pushOut)))
+				fmt.Fprintf(os.Stderr, "auto-git: %s\n", gitPushError)
+			} else {
+				fmt.Fprintf(os.Stderr, "auto-git: push ok (branch: %s)\n", branch)
 			}
 		}
 
@@ -389,11 +392,20 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 			}
 		}
 
+		conclusion := args.Conclusion
+		message := args.Message
+		if gitPushError != "" {
+			// git push failed — escalate to failure so the job/task is marked accordingly
+			conclusion = "failure"
+			message = fmt.Sprintf("%s\n\n⚠️ git push failed: %s", message, gitPushError)
+		}
+
 		stopPayload, _ := json.Marshal(map[string]string{
-			"message":    args.Message,
-			"conclusion": args.Conclusion,
-			"gitCommit":  gitCommit,
-			"gitBranch":  gitBranch,
+			"message":      message,
+			"conclusion":   conclusion,
+			"gitCommit":    gitCommit,
+			"gitBranch":    gitBranch,
+			"gitPushError": gitPushError,
 		})
 		body, err := control.ControlHTTPRequestWithBody(sockPath, "POST", "/stop-broadcast", stopPayload)
 		if err != nil {

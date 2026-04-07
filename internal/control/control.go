@@ -98,10 +98,11 @@ func StartControlServer(status *types.SharedStatus, program *tea.Program, restar
 		// Also accept JSON body
 		if r.Body != nil {
 			var body struct {
-				Message    string `json:"message"`
-				Conclusion string `json:"conclusion"`
-				GitCommit  string `json:"gitCommit"`
-				GitBranch  string `json:"gitBranch"`
+				Message      string `json:"message"`
+				Conclusion   string `json:"conclusion"`
+				GitCommit    string `json:"gitCommit"`
+				GitBranch    string `json:"gitBranch"`
+				GitPushError string `json:"gitPushError"`
 			}
 			if json.NewDecoder(r.Body).Decode(&body) == nil {
 				if body.Message != "" {
@@ -112,6 +113,7 @@ func StartControlServer(status *types.SharedStatus, program *tea.Program, restar
 				}
 				msg.GitCommit = body.GitCommit
 				msg.GitBranch = body.GitBranch
+				msg.GitPushError = body.GitPushError
 			}
 		}
 		go program.Send(msg)

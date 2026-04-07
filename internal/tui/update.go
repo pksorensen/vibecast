@@ -239,7 +239,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Phase = types.PhaseStopping
 			m.TransFrame = 0
 			m.TransDone = false
-			return m, tea.Batch(m.Spinner.Tick, stream.StopStream(m.TtydPID, m.TmuxSession, m.StreamID, m.PromptSharing, m.Panes, m.ResumeMode, msg.Message, msg.Conclusion, msg.GitCommit, msg.GitBranch), TransTick())
+			return m, tea.Batch(m.Spinner.Tick, stream.StopStream(m.TtydPID, m.TmuxSession, m.StreamID, m.PromptSharing, m.Panes, m.ResumeMode, msg.Message, msg.Conclusion, msg.GitCommit, msg.GitBranch, msg.GitPushError), TransTick())
 		}
 		// If waiting/menu, just quit
 		return m, tea.Quit
@@ -285,6 +285,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case types.ImageQueuedMsg:
+		if m.AutoApproveImages {
+			go stream.ApproveImage(m.StreamID, msg.Img.ImageID, true)
+			return m, nil
+		}
 		m.PendingImages = append(m.PendingImages, msg.Img)
 		m.ImageApprovals++
 		if m.Status != nil {

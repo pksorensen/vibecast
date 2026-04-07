@@ -327,13 +327,29 @@ func SpawnPane(sessionName, streamID, paneId, name string, status *types.SharedS
 		return nil, fmt.Errorf("failed to find free port for ttyd: %w", err)
 	}
 
+	// Extract the tmux socket path from $TMUX (format: socket_path,pid,session_id)
+	// before stripping it from ttyd's env. The main vibecast session lives on a
+	// dedicated socket; ttyd's bash must use the same socket so the group session
+	// can reference it. Without -S, tmux defaults to the default socket and
+	// cross-socket window references ("can't find window: main") fail.
+	socketFlag := ""
+
+	if tmuxEnv := os.Getenv("TMUX"); tmuxEnv != "" {
+		if parts := strings.SplitN(tmuxEnv, ",", 2); len(parts) > 0 && parts[0] != "" {
+			socketFlag = fmt.Sprintf("-S '%s' ", parts[0])
+		}
+	}
+
 	groupSession := sessionName + "-ttyd-" + paneId
 	ttydCmd := exec.Command("ttyd",
 		"--port", fmt.Sprintf("%d", ttydPort),
 		"bash", "-c",
 		fmt.Sprintf(
-			`tmux new-session -d -t '%s' -s '%s' && tmux select-window -t '%s:%s' && tmux attach -t '%s'`,
-			sessionName, groupSession, groupSession, paneId, groupSession,
+			// Kill any stale group session by the same name before creating a new one,
+			// then create a grouped session on the same dedicated tmux socket as the
+			// main vibecast session. Using -S ensures window references work correctly.
+			`tmux %[1]skill-session -t '%[2]s' 2>/dev/null; tmux %[1]snew-session -d -t '%[3]s' -s '%[2]s' && tmux %[1]sselect-window -t '%[2]s:%[4]s' && tmux %[1]sattach -t '%[2]s'`,
+			socketFlag, groupSession, sessionName, paneId,
 		),
 	)
 	// Strip $TMUX so ttyd's bash can run "tmux attach" without tmux refusing to nest sessions.
@@ -935,6 +951,9 @@ func StopStream(pid int, sessionName, streamID string, promptSharing bool, panes
 			}
 			if len(stopMessage) > 3 && stopMessage[3] != "" {
 				eventData["gitBranch"] = stopMessage[3]
+			}
+			if len(stopMessage) > 4 && stopMessage[4] != "" {
+				eventData["gitPushError"] = stopMessage[4]
 			}
 			// Include jobId if set via env (runner scenario)
 			if jobId := os.Getenv("AGENTICS_JOB_ID"); jobId != "" {

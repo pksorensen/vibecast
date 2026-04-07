@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"os"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -53,10 +54,11 @@ type Model struct {
 	SessionIndex   int
 	SessionScroll  int
 	// Image approvals
-	PendingImages  []types.PendingImage
-	ImageApprovals int
-	PhaseApprovals bool
-	ApprovalIndex  int
+	PendingImages    []types.PendingImage
+	ImageApprovals   int
+	PhaseApprovals   bool
+	ApprovalIndex    int
+	AutoApproveImages bool
 	// Multi-pane
 	Panes         []types.PaneInfo
 	ActivePaneIdx int
@@ -69,13 +71,14 @@ func InitialModel(status *types.SharedStatus) Model {
 	s.Style = lipgloss.NewStyle().Foreground(styles.AccentColor)
 
 	return Model{
-		Phase:            types.PhaseSplash,
-		Spinner:          s,
-		TmuxSession:      "vibecast",
-		ShowChat:         true,
-		PromptSharing:    true,
-		ShareProjectInfo: true,
-		Status:           status,
+		Phase:             types.PhaseSplash,
+		Spinner:           s,
+		TmuxSession:       "vibecast",
+		ShowChat:          true,
+		PromptSharing:     true,
+		ShareProjectInfo:  true,
+		Status:            status,
+		AutoApproveImages: os.Getenv("VIBECAST_AUTO_APPROVE_IMAGES") == "1",
 	}
 }
 
