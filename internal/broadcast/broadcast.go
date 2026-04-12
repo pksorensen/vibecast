@@ -16,11 +16,13 @@ import (
 	"unsafe"
 
 	"github.com/pksorensen/vibecast/internal/auth"
+	"github.com/pksorensen/vibecast/internal/telemetry"
 	"github.com/pksorensen/vibecast/internal/types"
 	"github.com/pksorensen/vibecast/internal/util"
 	ws "github.com/pksorensen/vibecast/internal/websocket"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[A-Za-z]|[^[]|][^\x07]*\x07)`)
@@ -148,6 +150,23 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 
 	done := make(chan struct{})
 
+	// Extract the tmux socket path from $TMUX (format: "socket,pid,session").
+	// When vibecast runs inside a tmux session on a non-default socket (e.g. the
+	// runner's /tmp/pks-runner-aspire.sock), exec'd "tmux" subcommands need -S
+	// explicitly — relying on $TMUX alone causes capture-pane to return empty.
+	tmuxSocket := ""
+	if tmuxEnv := os.Getenv("TMUX"); tmuxEnv != "" {
+		if idx := strings.Index(tmuxEnv, ","); idx > 0 {
+			tmuxSocket = tmuxEnv[:idx]
+		}
+	}
+	tmuxCmd := func(args ...string) *exec.Cmd {
+		if tmuxSocket != "" {
+			return exec.Command("tmux", append([]string{"-S", tmuxSocket}, args...)...)
+		}
+		return exec.Command("tmux", args...)
+	}
+
 	// Goroutine: poll broadcaster's terminal size and propagate to tmux -> viewers
 	go func() {
 		tmuxSess := "vibecast-" + streamID
@@ -172,7 +191,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 					}
 				}
 
-				out, err := exec.Command("tmux", "display-message", "-t", tmuxTarget, "-p", "#{pane_width} #{pane_height}").Output()
+				out, err := tmuxCmd("display-message", "-t", tmuxTarget, "-p", "#{pane_width} #{pane_height}").Output()
 				if err != nil {
 					continue
 				}
@@ -197,6 +216,11 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 	}()
 
 	// Goroutine: periodic terminal snapshot via tmux capture-pane
+	// Also handles auto-answering the Claude Code workspace trust dialog in job mode
+	// by checking the rendered screen text on each capture.
+	jobMode := os.Getenv("AGENTICS_JOB_MODE") == "1"
+	trustAnsweredSnap := false
+
 	go func() {
 		snapTmuxTarget := "vibecast-" + streamID + ":" + paneId
 		snapScheme := "https"
@@ -206,10 +230,38 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 		snapshotURL := fmt.Sprintf("%s://%s/_relay/snapshot", snapScheme, serverHost)
 
 		postSnapshot := func() {
-			out, err := exec.Command("tmux", "capture-pane", "-p", "-e", "-t", snapTmuxTarget).Output()
+			out, err := tmuxCmd("capture-pane", "-p", "-e", "-t", snapTmuxTarget).Output()
 			if err != nil {
 				logDebug("[broadcast] capture-pane error: %v\n", err)
 				return
+			}
+			// In job mode, check for the workspace trust dialog in the rendered screen.
+			if jobMode && !trustAnsweredSnap {
+				rendered := string(out)
+				if strings.Contains(rendered, "Quick safety check") {
+					allowedDir := os.Getenv("VIBECAST_ALLOWED_DIRECTORIES")
+					_, span := telemetry.Tracer().Start(
+						telemetry.ContextFromTraceparent(os.Getenv("TRACEPARENT")),
+						"vibecast.trust_prompt",
+					)
+					span.SetAttributes(
+						attribute.String("stream.id", streamID),
+						attribute.String("allowed_dir", allowedDir),
+					)
+					if allowedDir != "" && strings.Contains(rendered, allowedDir) {
+						// The trust dialog defaults to "❯ 1. Yes, I trust this folder".
+						// Send Enter alone — sending "1" + Enter in one call doesn't
+						// register reliably in BubbleTea; Enter on the default is enough.
+						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+						logDebug("[broadcast] auto-answered workspace trust prompt for %s\n", allowedDir)
+						span.SetAttributes(attribute.Bool("auto_answered", true))
+						trustAnsweredSnap = true
+					} else {
+						logDebug("[broadcast] trust prompt path does not match allowed dir %q — not auto-answering\n", allowedDir)
+						span.SetAttributes(attribute.Bool("auto_answered", false))
+					}
+					span.End()
+				}
 			}
 			body, _ := json.Marshal(map[string]string{
 				"streamId": streamID,
@@ -224,14 +276,23 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 			logDebug("[broadcast] snapshot posted (%d bytes)\n", len(out))
 		}
 
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
+		// Fast initial ticker: check every 500ms for the first 30s so we catch the
+		// trust prompt quickly, then switch to the regular 15s cadence.
+		fastTicker := time.NewTicker(500 * time.Millisecond)
+		fastDeadline := time.After(30 * time.Second)
+		slowTicker := time.NewTicker(15 * time.Second)
+		defer fastTicker.Stop()
+		defer slowTicker.Stop()
 		for {
 			select {
 			case <-done:
 				postSnapshot() // final snapshot on disconnect
 				return
-			case <-ticker.C:
+			case <-fastTicker.C:
+				postSnapshot()
+			case <-fastDeadline:
+				fastTicker.Stop()
+			case <-slowTicker.C:
 				postSnapshot()
 			}
 		}
@@ -248,9 +309,12 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 	}()
 
 	// Goroutine A: ttyd -> server (relay all frames)
-	// Also scans stdout (0x30 frames) for URLs and reports them via metadata API.
+	// Also scans stdout (0x30 frames) for URLs and reports them via metadata API,
+	// and auto-answers the Claude Code workspace trust dialog in job mode.
 	seenURLs := map[string]bool{}
 	var urlBuf strings.Builder
+	trustAnswered := false
+	var lastCaptureCheck time.Time
 	go func() {
 		defer close(done)
 		for {
@@ -287,6 +351,40 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 							seenURLs[u] = true
 							ctx := classifyURL(u)
 							go postURLDetected(serverHost, streamID, u, ctx)
+						}
+					}
+					// In job mode, auto-answer Claude Code's workspace trust dialog.
+					// Claude's Bubble Tea TUI renders with cursor movements so the raw
+					// VT100 stream doesn't contain "Quick safety check" as a contiguous
+					// string. Use tmux capture-pane (rendered screen text) instead,
+					// debounced to at most once per 500ms to avoid excess subprocess calls.
+					if jobMode && !trustAnswered && time.Since(lastCaptureCheck) > 500*time.Millisecond {
+						lastCaptureCheck = time.Now()
+						target := fmt.Sprintf("vibecast-%s:%s.0", streamID, paneId)
+						rendered, captureErr := tmuxCmd("capture-pane", "-p", "-t", target).Output()
+						if captureErr == nil {
+							renderedStr := string(rendered)
+							if strings.Contains(renderedStr, "Quick safety check") {
+								allowedDir := os.Getenv("VIBECAST_ALLOWED_DIRECTORIES")
+								_, span := telemetry.Tracer().Start(
+									telemetry.ContextFromTraceparent(os.Getenv("TRACEPARENT")),
+									"vibecast.trust_prompt",
+								)
+								span.SetAttributes(
+									attribute.String("stream.id", streamID),
+									attribute.String("allowed_dir", allowedDir),
+								)
+								if allowedDir != "" && strings.Contains(renderedStr, allowedDir) {
+									tmuxCmd("send-keys", "-t", target, "Enter").Run()
+									logDebug("[broadcast] auto-answered workspace trust prompt for %s\n", allowedDir)
+									span.SetAttributes(attribute.Bool("auto_answered", true))
+									trustAnswered = true
+								} else {
+									logDebug("[broadcast] trust prompt path does not match allowed dir %q — not auto-answering\n", allowedDir)
+									span.SetAttributes(attribute.Bool("auto_answered", false))
+								}
+								span.End()
+							}
 						}
 					}
 				} else if len(payload) > 0 {

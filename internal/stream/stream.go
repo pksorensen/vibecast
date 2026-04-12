@@ -15,6 +15,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/pksorensen/vibecast/internal/auth"
@@ -69,13 +70,34 @@ func buildAppendSystemPromptFlag() string {
 // a positional argument to Claude. The prompt is read from the file path set in
 // VIBECAST_INITIAL_PROMPT_FILE so that arbitrary multi-line content is handled safely
 // without shell-escaping or tmux send-keys timing issues.
+//
+// NOTE: passing a positional argument to claude starts interactive mode with that text
+// as the first user message. It is NOT the same as -p (print mode). -p causes Claude
+// to exit after responding; a positional arg keeps Claude interactive.
 func buildInitialPromptArg() string {
 	if file := os.Getenv("VIBECAST_INITIAL_PROMPT_FILE"); file != "" {
 		// Shell-escape single quotes in the file path
 		escapedPath := strings.ReplaceAll(file, "'", "'\"'\"'")
 		// "$(cat 'path')" expands to file content as a single argument, preserving newlines.
-		// Claude Code treats this as the initial user message and stays interactive.
 		return " \"$(cat '" + escapedPath + "')\""
+	}
+	return ""
+}
+
+// resolveWorkDir returns the directory Claude should start in.
+// If VIBECAST_ALLOWED_DIRECTORIES is set, the first entry is used directly (job isolation).
+// Otherwise falls back to git root detection.
+func resolveWorkDir() string {
+	allowedDirs := os.Getenv("VIBECAST_ALLOWED_DIRECTORIES")
+	if allowedDirs != "" {
+		parts := strings.SplitN(allowedDirs, ":", 2)
+		if dir := strings.TrimSpace(parts[0]); dir != "" {
+			return dir
+		}
+	}
+	// Fallback: use git root
+	if gitRoot, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		return strings.TrimSpace(string(gitRoot))
 	}
 	return ""
 }
@@ -123,9 +145,8 @@ func DoRestartClaude(sessionName string, resume bool, claudeSessionID string, pa
 		newCmd = buildClaudeCommand(claudePath, claudeSessionID)
 	}
 
-	// cd to git root
-	if gitRoot, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
-		root := strings.TrimSpace(string(gitRoot))
+	// cd to the job work dir (or git root if no isolation env var is set)
+	if root := resolveWorkDir(); root != "" {
 		newCmd = "cd " + root + " && " + newCmd
 	}
 
@@ -279,6 +300,19 @@ func SpawnFKeyBar(sessionName, windowName, streamID string) string {
 	return fkeybarPaneID
 }
 
+// paneDimensions returns the configured pane width and height (cols, rows) as strings.
+// Defaults to 150x50; override via VIBECAST_PANE_COLS / VIBECAST_PANE_ROWS env vars.
+func paneDimensions() (string, string) {
+	cols, rows := "150", "50"
+	if v := os.Getenv("VIBECAST_PANE_COLS"); v != "" {
+		cols = v
+	}
+	if v := os.Getenv("VIBECAST_PANE_ROWS"); v != "" {
+		rows = v
+	}
+	return cols, rows
+}
+
 // SpawnPane creates a new tmux window, starts ttyd, launches Claude, and begins broadcast relay.
 func SpawnPane(sessionName, streamID, paneId, name string, status *types.SharedStatus, claudeResumeID string) (*types.PaneInfo, error) {
 	claudeSessionID := util.GenerateUUIDv4()
@@ -298,15 +332,13 @@ func SpawnPane(sessionName, streamID, paneId, name string, status *types.SharedS
 		windowCmd = buildClaudeCommand(claudePath, claudeSessionID)
 	}
 
-	// cd to git root before launching Claude
-	if gitRoot, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
-		root := strings.TrimSpace(string(gitRoot))
+	// cd to the job work dir (or git root if no isolation env var is set)
+	if root := resolveWorkDir(); root != "" {
 		windowCmd = "cd " + root + " && " + windowCmd
 	}
 
 	// Create window with Claude as the initial command — no shell prompt visible.
-	// When Claude exits, the sh process exits and the pane becomes dead.
-	// Set remain-on-exit so the pane stays for potential restart via respawn-pane.
+	// Window inherits the session's fixed size (set via new-session -x/-y in StartStream).
 	cmd := exec.Command("tmux", "new-window", "-t", sessionName, "-n", paneId,
 		"sh", "-c", windowCmd)
 	cmd.Env = append(os.Environ(), "HISTFILE=") // suppress shell history echoing
@@ -314,12 +346,17 @@ func SpawnPane(sessionName, streamID, paneId, name string, status *types.SharedS
 		return nil, fmt.Errorf("failed to create tmux window %s: %w", paneId, err)
 	}
 
-	// Spawn fkeybar in a bottom split pane
-	fkeybarPaneID := SpawnFKeyBar(sessionName, paneId, streamID)
-	if fkeybarPaneID != "" && status != nil {
-		status.Mu.Lock()
-		status.FKeyBarPaneIDs = append(status.FKeyBarPaneIDs, fkeybarPaneID)
-		status.Mu.Unlock()
+	// Spawn fkeybar in a bottom split pane only when VIBECAST_STREAM_FULL_WINDOW=1.
+	// By default (stream-pane-only mode) the split is omitted so viewers see only
+	// the Claude pane. Broadcaster F-key bindings remain active at the tmux session
+	// level regardless.
+	if os.Getenv("VIBECAST_STREAM_FULL_WINDOW") == "1" {
+		fkeybarPaneID := SpawnFKeyBar(sessionName, paneId, streamID)
+		if fkeybarPaneID != "" && status != nil {
+			status.Mu.Lock()
+			status.FKeyBarPaneIDs = append(status.FKeyBarPaneIDs, fkeybarPaneID)
+			status.Mu.Unlock()
+		}
 	}
 
 	ttydPort, err := util.FindFreePort()
@@ -389,6 +426,14 @@ func SpawnPane(sessionName, streamID, paneId, name string, status *types.SharedS
 	}, nil
 }
 
+// streamError records the error on the span and returns a StreamErrorMsg.
+func streamError(span trace.Span, err error) types.StreamErrorMsg {
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+	logDebug("[stream] error: %v\n", err)
+	return types.StreamErrorMsg{Err: err}
+}
+
 // StartStream creates a new broadcast session.
 func StartStream(promptSharing, shareProjectInfo bool, projectName string, resumeStreamID string, claudeResumeID string, status *types.SharedStatus) tea.Cmd {
 	return func() tea.Msg {
@@ -397,7 +442,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 			streamID = util.GenerateStreamID()
 		}
 
-		_, span := telemetry.Tracer().Start(context.Background(), "vibecast.stream.start",
+		streamCtx, span := telemetry.Tracer().Start(context.Background(), "vibecast.stream.start",
 			trace.WithAttributes(
 				attribute.String("stream.id", streamID),
 				attribute.Bool("stream.resumed", resumeStreamID != ""),
@@ -430,15 +475,61 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		if tp := os.Getenv("TERM_PROGRAM"); tp != "" {
 			infoCmd = "TERM_PROGRAM=" + tp + " " + infoCmd
 		}
-		// Use -c to set the session's default directory so new windows (Claude panes) inherit it
+		// Use -c to set the session's default directory so new windows (Claude panes) inherit it.
+		// -x/-y pin the session (and all its windows) to a fixed size so every viewer sees the
+		// same width regardless of the broadcaster's terminal dimensions.
 		sessionDir, _ := os.Getwd()
-		cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", sessionDir, "-n", "info",
+		sessionCols, sessionRows := paneDimensions()
+		cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", sessionDir,
+			"-x", sessionCols, "-y", sessionRows, "-n", "info",
 			"sh", "-c", infoCmd)
 		if err := cmd.Run(); err != nil {
-			return types.StreamErrorMsg{Err: fmt.Errorf("failed to create tmux session: %w", err)}
+			return streamError(span, fmt.Errorf("failed to create tmux session: %w", err))
 		}
 
 		exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_STREAM_ID", streamID).Run()
+		// Propagate W3C traceparent for this stream so hook subprocesses create child spans.
+		if tp := telemetry.TraceparentFromContext(streamCtx); tp != "" {
+			exec.Command("tmux", "set-environment", "-t", sessionName, "TRACEPARENT", tp).Run()
+		}
+		// Propagate OTEL env vars so Claude (spawned in a new tmux window) also sends telemetry.
+		// tmux new-window inherits the session global env, not the calling process env.
+		// Signal-specific endpoint vars (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT etc.) are required
+		// by Claude Code in addition to the generic OTEL_EXPORTER_OTLP_ENDPOINT used by vibecast.
+		for _, key := range []string{
+			"OTEL_EXPORTER_OTLP_ENDPOINT",
+			"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+			"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+			"OTEL_EXPORTER_OTLP_INSECURE",
+			"OTEL_EXPORTER_OTLP_PROTOCOL",
+			"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+			"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+			"OTEL_SERVICE_NAME",
+			"OTEL_RESOURCE_ATTRIBUTES",
+			"OTEL_TRACES_EXPORTER",
+			"OTEL_LOGS_EXPORTER",
+			"OTEL_TRACES_EXPORT_INTERVAL",
+			"OTEL_LOGS_EXPORT_INTERVAL",
+			"CLAUDE_CODE_ENABLE_TELEMETRY",
+			"CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
+		} {
+			if val := os.Getenv(key); val != "" {
+				exec.Command("tmux", "set-environment", "-t", sessionName, key, val).Run()
+			}
+		}
+		// Append vibecast.stream_id to OTEL_RESOURCE_ATTRIBUTES so Claude's telemetry
+		// (which runs in this tmux session) gets associated with the correct stream in
+		// Next.js. Must happen AFTER the OTEL_RESOURCE_ATTRIBUTES propagation above.
+		{
+			streamAttr := "vibecast.stream_id=" + streamID
+			updated := streamAttr
+			if existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES"); existing != "" {
+				updated = existing + "," + streamAttr
+			}
+			os.Setenv("OTEL_RESOURCE_ATTRIBUTES", updated)
+			exec.Command("tmux", "set-environment", "-t", sessionName, "OTEL_RESOURCE_ATTRIBUTES", updated).Run()
+		}
 		// Propagate VIBECAST_HOME so hooks/sessions resolve to the correct .vibecast directory
 		if vh := os.Getenv("VIBECAST_HOME"); vh != "" {
 			exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_HOME", vh).Run()
@@ -508,7 +599,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		if authConfig, err := auth.FetchAuthConfig(serverHost); err == nil {
 			if authConfig.AuthRequired {
 				if _, _, authErr := auth.GetValidToken(); authErr != nil {
-					return types.StreamErrorMsg{Err: fmt.Errorf("authentication required — run 'vibecast login' first")}
+					return streamError(span, fmt.Errorf("authentication required — run 'vibecast login' first"))
 				}
 			}
 		}
@@ -551,6 +642,20 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 				// Rewrite localhost/127.0.0.1 to serverHost so telemetry works from
 				// inside containers where localhost != the host machine.
 				for k, v := range result.Env {
+					// If a runner (or caller) already set OTEL_EXPORTER_OTLP_ENDPOINT,
+					// skip the server-provided value — the runner acts as an OTLP proxy
+					// that fans out to both Aspire and Next.js, so we must not override it.
+					if k == "OTEL_EXPORTER_OTLP_ENDPOINT" && os.Getenv(k) != "" {
+						logDebug("[stream] skipping %s override (runner proxy already set)\n", k)
+						continue
+					}
+					// Merge OTEL_RESOURCE_ATTRIBUTES: append server-provided attrs to any
+					// existing value (e.g. job.id,run.id,task.id set by the runner).
+					if k == "OTEL_RESOURCE_ATTRIBUTES" {
+						if existing := os.Getenv(k); existing != "" {
+							v = existing + "," + v
+						}
+					}
 					if strings.Contains(v, "://localhost") || strings.Contains(v, "://127.0.0.1") {
 						if parsed, err := url.Parse(v); err == nil {
 							parsed.Host = serverHost
@@ -575,7 +680,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 
 		mainPane, err := SpawnPane(sessionName, streamID, "main", "Main", status, claudeResumeID)
 		if err != nil {
-			return types.StreamErrorMsg{Err: fmt.Errorf("failed to spawn main pane: %w", err)}
+			return streamError(span, fmt.Errorf("failed to spawn main pane: %w", err))
 		}
 		claudeSessionID := mainPane.ClaudeSessionID
 
@@ -666,7 +771,7 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 		if authConfig, err := auth.FetchAuthConfig(serverHost); err == nil {
 			if authConfig.AuthRequired {
 				if _, _, authErr := auth.GetValidToken(); authErr != nil {
-					return types.StreamErrorMsg{Err: fmt.Errorf("authentication required — run 'vibecast login' first")}
+					return streamError(span, fmt.Errorf("authentication required — run 'vibecast login' first"))
 				}
 			}
 		}
@@ -724,6 +829,11 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 				}
 				// Set env vars in current process so SpawnPane inherits them
 				for k, v := range serverEnv {
+					if k == "OTEL_RESOURCE_ATTRIBUTES" {
+						if existing := os.Getenv(k); existing != "" {
+							v = existing + "," + v
+						}
+					}
 					os.Setenv(k, v)
 					logDebug("[resume] set env %s=%s\n", k, v)
 				}
@@ -777,6 +887,19 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 			for k, v := range serverEnv {
 				exec.Command("tmux", "set-environment", "-t", sessionName, k, v).Run()
 			}
+			// Ensure vibecast.stream_id is in OTEL_RESOURCE_ATTRIBUTES
+			{
+				streamAttr := "vibecast.stream_id=" + streamID
+				existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES")
+				if v, ok := serverEnv["OTEL_RESOURCE_ATTRIBUTES"]; ok && existing == "" {
+					existing = v
+				}
+				updated := streamAttr
+				if existing != "" {
+					updated = existing + "," + streamAttr
+				}
+				exec.Command("tmux", "set-environment", "-t", sessionName, "OTEL_RESOURCE_ATTRIBUTES", updated).Run()
+			}
 
 			// Bind F-keys at the tmux session level
 			BindFKeys(sessionName)
@@ -791,7 +914,7 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 
 				ttydPort, err := util.FindFreePort()
 				if err != nil {
-					return types.StreamErrorMsg{Err: fmt.Errorf("failed to find free port: %w", err)}
+					return streamError(span, fmt.Errorf("failed to find free port: %w", err))
 				}
 
 				ttydCmd := exec.Command("ttyd",
@@ -799,7 +922,7 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 					"tmux", "attach", "-t", target,
 				)
 				if err := ttydCmd.Start(); err != nil {
-					return types.StreamErrorMsg{Err: fmt.Errorf("failed to start ttyd for pane %s: %w", pe.PaneID, err)}
+					return streamError(span, fmt.Errorf("failed to start ttyd for pane %s: %w", pe.PaneID, err))
 				}
 
 				time.Sleep(500 * time.Millisecond)
@@ -827,13 +950,26 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 
 			cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-n", "control")
 			if err := cmd.Run(); err != nil {
-				return types.StreamErrorMsg{Err: fmt.Errorf("failed to create tmux session: %w", err)}
+				return streamError(span, fmt.Errorf("failed to create tmux session: %w", err))
 			}
 
 			exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_STREAM_ID", streamID).Run()
 			// Propagate OTEL env vars to the new tmux session
 			for k, v := range serverEnv {
 				exec.Command("tmux", "set-environment", "-t", sessionName, k, v).Run()
+			}
+			// Ensure vibecast.stream_id is in OTEL_RESOURCE_ATTRIBUTES
+			{
+				streamAttr := "vibecast.stream_id=" + streamID
+				existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES")
+				if v, ok := serverEnv["OTEL_RESOURCE_ATTRIBUTES"]; ok && existing == "" {
+					existing = v
+				}
+				updated := streamAttr
+				if existing != "" {
+					updated = existing + "," + streamAttr
+				}
+				exec.Command("tmux", "set-environment", "-t", sessionName, "OTEL_RESOURCE_ATTRIBUTES", updated).Run()
 			}
 			exec.Command("tmux", "set-option", "-t", sessionName, "window-size", "largest").Run()
 			exec.Command("tmux", "set-option", "-t", sessionName, "status", "on").Run()
@@ -859,7 +995,7 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 		}
 
 		if mainPane == nil {
-			return types.StreamErrorMsg{Err: fmt.Errorf("no valid panes found for stream %s", streamID)}
+			return streamError(span, fmt.Errorf("no valid panes found for stream %s", streamID))
 		}
 
 		sf.PID = os.Getpid()

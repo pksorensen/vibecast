@@ -43,6 +43,7 @@ type Model struct {
 	// Resume
 	ResumeStreamID string
 	ResumeMode     bool
+	ClaudeResumeID string // prior session ID to pass to claude --resume (set from VIBECAST_RESUME_SESSION_ID)
 	// Claude session
 	ClaudeSessionID string
 	// Metadata channel

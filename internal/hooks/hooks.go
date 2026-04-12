@@ -35,7 +35,10 @@ func HandleHookCommand(args []string) {
 		os.Exit(1)
 	}
 
-	ctx, span := telemetry.Tracer().Start(context.Background(), "vibecast.hook",
+	// Reconstruct parent context from W3C traceparent injected by the stream into the tmux session.
+	// This connects hook spans as children of the vibecast.stream.start span.
+	parentCtx := telemetry.ContextFromTraceparent(os.Getenv("TRACEPARENT"))
+	ctx, span := telemetry.Tracer().Start(parentCtx, "vibecast.hook",
 		trace.WithAttributes(attribute.String("hook.type", args[0])))
 	defer span.End()
 	_ = ctx
@@ -384,6 +387,48 @@ func handleHookTool() {
 	}
 
 	util.DebugLog("[tool] checkpoint B: parsed tool_name=%s tool_use_id=%s", hookInput.ToolName, hookInput.ToolUseID)
+
+	// Job mode: block writes/edits outside the allowed job work tree.
+	// VIBECAST_ALLOWED_DIRECTORIES is set by the runner to the job work tree path.
+	if os.Getenv("AGENTICS_JOB_MODE") == "1" {
+		if allowedDir := os.Getenv("VIBECAST_ALLOWED_DIRECTORIES"); allowedDir != "" {
+			// Extract file path from Write, Edit, MultiEdit, NotebookEdit tool inputs
+			var filePath string
+			switch hookInput.ToolName {
+			case "Write", "Edit", "MultiEdit":
+				var inp struct {
+					FilePath string `json:"file_path"`
+				}
+				json.Unmarshal(hookInput.ToolInput, &inp)
+				filePath = inp.FilePath
+			case "NotebookEdit":
+				var inp struct {
+					NotebookPath string `json:"notebook_path"`
+				}
+				json.Unmarshal(hookInput.ToolInput, &inp)
+				filePath = inp.NotebookPath
+			}
+			if filePath != "" {
+				abs, err := filepath.Abs(filePath)
+				if err == nil {
+					allowed := filepath.Clean(allowedDir)
+					// Block if the resolved path is not inside the job work tree
+					if abs != allowed && !strings.HasPrefix(abs, allowed+string(filepath.Separator)) {
+						reason := fmt.Sprintf(
+							"Access denied: %s is outside the job work tree.\n\nThis job is restricted to: %s\n\nAll file modifications must be made within the job work tree.",
+							abs, allowed,
+						)
+						output, _ := json.Marshal(map[string]interface{}{
+							"decision": "block",
+							"reason":   reason,
+						})
+						os.Stdout.Write(output)
+						os.Exit(1)
+					}
+				}
+			}
+		}
+	}
 
 	if hookInput.ToolName == "ExitPlanMode" {
 		var planInput struct {

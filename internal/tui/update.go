@@ -403,7 +403,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Status.Mu.Unlock()
 			m.Status.BroadcastEvent(`{"type":"phase","phase":"starting"}`)
 		}
-		return m, tea.Batch(m.Spinner.Tick, stream.StartStream(msg.PromptSharing, msg.ShareProjectInfo, m.ProjectName, m.ResumeStreamID, "", m.Status), TransTick())
+		return m, tea.Batch(m.Spinner.Tick, stream.StartStream(msg.PromptSharing, msg.ShareProjectInfo, m.ProjectName, m.ResumeStreamID, m.ClaudeResumeID, m.Status), TransTick())
 
 	case types.FKeyActionMsg:
 		// F-key actions forwarded from control socket

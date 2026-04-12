@@ -69,6 +69,8 @@ func Execute() {
 	if resumeStreamID == "" {
 		resumeStreamID = os.Getenv("STREAM_ID")
 	}
+	// Runner passes the prior Claude session ID so vibecast can resume it via --resume
+	claudeResumeID := os.Getenv("VIBECAST_RESUME_SESSION_ID")
 
 	// Initialize OpenTelemetry
 	otelShutdown, _ := telemetry.InitOTEL(context.Background())
@@ -90,6 +92,7 @@ func Execute() {
 	m := tui.WaitingModel(status)
 	m.ResumeStreamID = resumeStreamID
 	m.ResumeMode = resumeMode
+	m.ClaudeResumeID = claudeResumeID
 
 	p := tea.NewProgram(m, tea.WithoutRenderer(), tea.WithInput(nil))
 
@@ -180,11 +183,17 @@ func Execute() {
 		os.Exit(0)
 	}()
 
-	// Start chat connection goroutine
+	// Start chat connection goroutine — use the live stream ID once streaming starts.
 	go func() {
 		for i := 0; i < 60; i++ {
 			time.Sleep(2 * time.Second)
-			broadcast.ConnectChat("default", p)
+			status.Mu.Lock()
+			chatStreamID := status.StreamID
+			status.Mu.Unlock()
+			if chatStreamID == "" {
+				chatStreamID = "default"
+			}
+			broadcast.ConnectChat(chatStreamID, p)
 		}
 	}()
 

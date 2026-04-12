@@ -10,6 +10,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
@@ -56,6 +57,7 @@ func InitOTEL(ctx context.Context) (func(), error) {
 		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	shutdown := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -115,6 +117,7 @@ func ConfigureOTEL(oldShutdown func(), endpoint string, insecure bool, serviceNa
 		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	shutdown := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -124,6 +127,25 @@ func ConfigureOTEL(oldShutdown func(), endpoint string, insecure bool, serviceNa
 
 	fmt.Fprintf(os.Stderr, "[otel] Reconfigured: endpoint=%s insecure=%v service=%s\n", endpoint, insecure, serviceName)
 	return shutdown, nil
+}
+
+// TraceparentFromContext extracts the W3C traceparent string from a context
+// that holds an active span. Returns "" if no span is active or OTEL not configured.
+func TraceparentFromContext(ctx context.Context) string {
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	return carrier.Get("traceparent")
+}
+
+// ContextFromTraceparent reconstructs a context with a remote span context from
+// a W3C traceparent string (typically read from the TRACEPARENT env var).
+// The returned context can be used as the parent for new spans.
+func ContextFromTraceparent(traceparent string) context.Context {
+	if traceparent == "" {
+		return context.Background()
+	}
+	carrier := propagation.MapCarrier{"traceparent": traceparent}
+	return otel.GetTextMapPropagator().Extract(context.Background(), carrier)
 }
 
 // PluginDir returns the absolute path to the claude-plugin directory

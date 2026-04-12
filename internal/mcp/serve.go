@@ -353,8 +353,8 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 		// Claude Code shows "N local agents" in the status bar when subagents are active.
 		if tmuxPane := os.Getenv("TMUX_PANE"); tmuxPane != "" {
 			if out, err := exec.Command("tmux", "capture-pane", "-p", "-t", tmuxPane).Output(); err == nil {
-				if matched, _ := regexp.MatchString(`\d+ local agents`, string(out)); matched {
-					resultText = "Cannot end session: background agents are still running.\n\nRun this bash command to wait for them to finish, then call stop_broadcast again:\n  bash -c 'while tmux capture-pane -p -t $TMUX_PANE 2>/dev/null | grep -qE \"[0-9]+ local agents\"; do sleep 15; done'\n\nDo NOT retry stop_broadcast immediately — wait for agents to finish first."
+				if matched, _ := regexp.MatchString(`\d+ local agents?`, string(out)); matched {
+					resultText = "Cannot end session: background agents are still running.\n\nRun this bash command to wait for them to finish, then call stop_broadcast again:\n  bash -c 'while tmux capture-pane -p -t $TMUX_PANE 2>/dev/null | grep -qE \"[0-9]+ local agents?\"; do sleep 15; done'\n\nDo NOT retry stop_broadcast immediately — wait for agents to finish first."
 					isError = true
 					break
 				}
