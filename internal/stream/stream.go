@@ -116,10 +116,11 @@ func buildClaudeCommand(claudePath string, sessionID string) string {
 func buildClaudeResumeCommand(claudePath string, sessionID string) string {
 	pluginFlags := buildPluginFlags()
 	promptFlag := buildAppendSystemPromptFlag()
+	initialPrompt := buildInitialPromptArg()
 	if sessionID != "" {
-		return claudePath + " --dangerously-skip-permissions" + pluginFlags + promptFlag + " --resume " + sessionID
+		return claudePath + " --dangerously-skip-permissions" + pluginFlags + promptFlag + " --resume " + sessionID + initialPrompt
 	}
-	return claudePath + " --dangerously-skip-permissions" + pluginFlags + promptFlag + " --continue"
+	return claudePath + " --dangerously-skip-permissions" + pluginFlags + promptFlag + " --continue" + initialPrompt
 }
 
 // DoRestartClaude performs the actual restart logic.
@@ -559,6 +560,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		for _, key := range []string{
 			"AGENTICS_JOB_ID",
 			"AGENTICS_TOKEN",
+			"AGENTICS_REPO_TOKEN",
 			"AGENTICS_BASE_URL",
 			"AGENTICS_OWNER",
 			"AGENTICS_PROJECT_NAME",
@@ -1097,6 +1099,29 @@ func StopStream(pid int, sessionName, streamID string, promptSharing bool, panes
 			}
 			eventBody, _ := json.Marshal(eventData)
 			http.Post(apiURL, "application/json", bytes.NewReader(eventBody))
+		}
+
+		// Mark the span as error when conclusion is not success so failures
+		// are visible as errors in the Aspire dashboard / distributed traces.
+		conclusion := ""
+		if len(stopMessage) > 1 {
+			conclusion = stopMessage[1]
+		}
+		if conclusion != "" && conclusion != "success" {
+			msg := conclusion
+			if len(stopMessage) > 0 && stopMessage[0] != "" {
+				msg = stopMessage[0]
+			}
+			span.SetStatus(codes.Error, msg)
+			span.SetAttributes(
+				attribute.String("station.conclusion", conclusion),
+				attribute.String("station.completion_message", msg),
+			)
+		} else if conclusion == "success" && len(stopMessage) > 0 && stopMessage[0] != "" {
+			span.SetAttributes(
+				attribute.String("station.conclusion", "success"),
+				attribute.String("station.completion_message", stopMessage[0]),
+			)
 		}
 
 		session.DeleteSessionFile(streamID)

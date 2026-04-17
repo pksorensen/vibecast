@@ -237,6 +237,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case types.ControlStopMsg:
 		if m.Phase == types.PhaseLive {
 			m.Phase = types.PhaseStopping
+			m.Status.Phase = "stopping" // tell the stop hook stop_broadcast was already called
 			m.TransFrame = 0
 			m.TransDone = false
 			return m, tea.Batch(m.Spinner.Tick, stream.StopStream(m.TtydPID, m.TmuxSession, m.StreamID, m.PromptSharing, m.Panes, m.ResumeMode, msg.Message, msg.Conclusion, msg.GitCommit, msg.GitBranch, msg.GitPushError), TransTick())

@@ -31,7 +31,7 @@ import (
 // HandleHookCommand dispatches to the appropriate hook handler.
 func HandleHookCommand(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "usage: vibecast hook <prompt|session|tool|post-tool|subagent-start|subagent-stop|stop|permission-request>\n")
+		fmt.Fprintf(os.Stderr, "usage: vibecast hook <prompt|session|tool|post-tool|subagent-start|subagent-stop|stop|permission-request|pre-compact|post-compact>\n")
 		os.Exit(1)
 	}
 
@@ -56,12 +56,20 @@ func HandleHookCommand(args []string) {
 		handleHookSubagentStart()
 	case "subagent-stop":
 		handleHookSubagentStop()
+	case "task-created":
+		handleHookTaskCreated()
+	case "task-completed":
+		handleHookTaskCompleted()
 	case "stop":
 		handleHookStop()
 	case "permission-request":
 		handleHookPermissionRequest()
+	case "pre-compact":
+		handleHookPreCompact()
+	case "post-compact":
+		handleHookPostCompact()
 	default:
-		fmt.Fprintf(os.Stderr, "usage: vibecast hook <prompt|session|tool|post-tool|subagent-start|subagent-stop|stop|permission-request>\n")
+		fmt.Fprintf(os.Stderr, "usage: vibecast hook <prompt|session|tool|post-tool|subagent-start|subagent-stop|stop|permission-request|pre-compact|post-compact>\n")
 		os.Exit(1)
 	}
 }
@@ -587,6 +595,7 @@ func handleHookSubagentStop() {
 
 	transcriptLines := readTranscriptIncrement(sf.StreamID, transcriptPath)
 	agentTranscriptLines := readTranscriptIncrement(sf.StreamID, hookInput.AgentTranscriptPath)
+	agentPrompt := readFirstUserPrompt(hookInput.AgentTranscriptPath)
 
 	p := map[string]interface{}{
 		"streamId":            sf.StreamID,
@@ -596,6 +605,7 @@ func handleHookSubagentStop() {
 		"agentType":           hookInput.AgentType,
 		"transcriptPath":      transcriptPath,
 		"agentTranscriptPath": hookInput.AgentTranscriptPath,
+		"prompt":              agentPrompt,
 		"timestamp":           time.Now().Unix(),
 	}
 
@@ -608,6 +618,66 @@ func handleHookSubagentStop() {
 		if len(toolUseIDs) > 0 {
 			p["toolUseIds"] = toolUseIDs
 		}
+	}
+
+	payload, _ := json.Marshal(p)
+	HookPostMetadata(sf, payload)
+	os.Exit(0)
+}
+
+func handleHookTaskCreated() {
+	stdinData, sf, _, _, _ := hookReadStdinAndFindSession()
+
+	var hookInput struct {
+		TaskID          string `json:"task_id"`
+		TaskSubject     string `json:"task_subject"`
+		TaskDescription string `json:"task_description"`
+		TeammateName    string `json:"teammate_name"`
+		TeamName        string `json:"team_name"`
+	}
+	if err := json.Unmarshal(stdinData, &hookInput); err != nil {
+		os.Exit(0)
+	}
+
+	p := map[string]interface{}{
+		"streamId":        sf.StreamID,
+		"type":            "metadata",
+		"subtype":         "task_created",
+		"taskId":          hookInput.TaskID,
+		"taskSubject":     hookInput.TaskSubject,
+		"taskDescription": hookInput.TaskDescription,
+		"teammateName":    hookInput.TeammateName,
+		"teamName":        hookInput.TeamName,
+		"timestamp":       time.Now().Unix(),
+	}
+
+	payload, _ := json.Marshal(p)
+	HookPostMetadata(sf, payload)
+	os.Exit(0)
+}
+
+func handleHookTaskCompleted() {
+	stdinData, sf, _, _, _ := hookReadStdinAndFindSession()
+
+	var hookInput struct {
+		TaskID       string `json:"task_id"`
+		TaskSubject  string `json:"task_subject"`
+		TeammateName string `json:"teammate_name"`
+		TeamName     string `json:"team_name"`
+	}
+	if err := json.Unmarshal(stdinData, &hookInput); err != nil {
+		os.Exit(0)
+	}
+
+	p := map[string]interface{}{
+		"streamId":     sf.StreamID,
+		"type":         "metadata",
+		"subtype":      "task_completed",
+		"taskId":       hookInput.TaskID,
+		"taskSubject":  hookInput.TaskSubject,
+		"teammateName": hookInput.TeammateName,
+		"teamName":     hookInput.TeamName,
+		"timestamp":    time.Now().Unix(),
 	}
 
 	payload, _ := json.Marshal(p)
@@ -762,16 +832,41 @@ func handleHookPermissionRequest() {
 		os.Exit(0)
 	}
 
-	// Post to metadata — this creates the vote record and broadcasts a vote card to chat.
-	// The runner (pks-cli) polls for the resolved vote and answers via tmux send-keys,
-	// the same way it handles AskUserQuestion.
+	// Post to metadata — creates the vote record on the server and broadcasts a vote card to chat.
+	// Then block and poll GET /question-vote until team resolves the vote (or 30s timeout).
+	// If team votes Deny: output {"decision":"deny"} + exit 1. Allow or timeout: exit 0.
+	//
+	// When Claude Code doesn't supply a tool_use_id (common for PreToolUse permission hooks),
+	// we generate a synthetic one using the same perm-<streamId>-<ms> format the server uses
+	// as a fallback. Sending it ourselves ensures the server uses OUR id — so we can poll for it.
+	syntheticId := hookInput.ToolUseID == ""
+	toolUseId := hookInput.ToolUseID
+	if toolUseId == "" {
+		toolUseId = fmt.Sprintf("perm-%s-%d", sf.StreamID, time.Now().UnixMilli())
+	}
+
+	// Root span for the entire permission lifecycle — visible in Aspire traces.
+	hookStart := time.Now()
+	_, span := telemetry.Tracer().Start(
+		telemetry.ContextFromTraceparent(os.Getenv("TRACEPARENT")),
+		"vibecast.permission_request",
+		trace.WithAttributes(
+			attribute.String("stream.id", sf.StreamID),
+			attribute.String("tool.name", hookInput.ToolName),
+			attribute.String("tool.use_id", toolUseId),
+			attribute.String("question", question),
+			attribute.Bool("synthetic_id", syntheticId),
+		),
+	)
+	defer span.End()
+
 	p := map[string]interface{}{
 		"streamId":  sf.StreamID,
 		"type":      "metadata",
 		"subtype":   "permission_request",
 		"toolName":  hookInput.ToolName,
 		"toolInput": toolInput,
-		"toolUseId": hookInput.ToolUseID,
+		"toolUseId": toolUseId,
 		"question":  question,
 		"timestamp": time.Now().Unix(),
 	}
@@ -780,6 +875,196 @@ func handleHookPermissionRequest() {
 		json.Unmarshal(hookInput.PermissionSuggestions, &ps)
 		p["permissionSuggestions"] = ps
 	}
+	payload, _ := json.Marshal(p)
+	HookPostMetadata(sf, payload)
+	span.AddEvent("metadata_posted", trace.WithAttributes(attribute.String("tool.use_id", toolUseId)))
+	util.DebugLog("[permission-request] metadata posted toolUseId=%s syntheticId=%v", toolUseId, syntheticId)
+
+	// Poll for the resolved vote (2s interval, 31s total — slightly longer than the 30s voteDeadline
+	// so the server's auto-resolve fires first and the hook sees a resolved answer before timing out).
+	scheme := "https"
+	if util.IsLocalHost(sf.ServerHost) {
+		scheme = "http"
+	}
+	voteURL := fmt.Sprintf("%s://%s/api/lives/question-vote?streamId=%s&toolUseId=%s",
+		scheme, sf.ServerHost, sf.StreamID, toolUseId)
+	util.DebugLog("[permission-request] polling voteURL=%s", voteURL)
+
+	deadline := time.Now().Add(31 * time.Second)
+	attempt := 0
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		attempt++
+		elapsedMs := time.Since(hookStart).Milliseconds()
+
+		_, pollSpan := telemetry.Tracer().Start(context.Background(), "vibecast.permission_request.poll",
+			trace.WithAttributes(
+				attribute.String("stream.id", sf.StreamID),
+				attribute.String("tool.use_id", toolUseId),
+				attribute.Int("poll.attempt", attempt),
+				attribute.Int64("poll.elapsed_ms", elapsedMs),
+			),
+		)
+
+		req, err := http.NewRequest("GET", voteURL, nil)
+		if err != nil {
+			pollSpan.RecordError(err)
+			pollSpan.SetAttributes(attribute.String("poll.error", err.Error()))
+			pollSpan.End()
+			util.DebugLog("[permission-request] poll #%d request error: %v", attempt, err)
+			continue
+		}
+		if token, _, authErr := auth.GetValidToken(); authErr == nil && token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			pollSpan.RecordError(err)
+			pollSpan.SetAttributes(attribute.String("poll.error", err.Error()))
+			pollSpan.End()
+			util.DebugLog("[permission-request] poll #%d http error: %v", attempt, err)
+			continue
+		}
+		httpStatus := resp.StatusCode
+		var vote struct {
+			ResolvedAnswer *string `json:"resolvedAnswer"`
+			VoteDeadline   int64   `json:"voteDeadline"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&vote)
+		resp.Body.Close()
+
+		pollSpan.SetAttributes(
+			attribute.Int("poll.http_status", httpStatus),
+			attribute.Bool("poll.resolved", vote.ResolvedAnswer != nil),
+		)
+		if vote.ResolvedAnswer != nil {
+			pollSpan.SetAttributes(attribute.String("poll.answer", *vote.ResolvedAnswer))
+		}
+		if decodeErr != nil {
+			pollSpan.RecordError(decodeErr)
+			pollSpan.SetAttributes(attribute.String("poll.decode_error", decodeErr.Error()))
+			pollSpan.End()
+			util.DebugLog("[permission-request] poll #%d decode error (status=%d): %v", attempt, httpStatus, decodeErr)
+			continue
+		}
+		pollSpan.End()
+		util.DebugLog("[permission-request] poll #%d status=%d resolved=%v answer=%v elapsed=%dms",
+			attempt, httpStatus, vote.ResolvedAnswer != nil,
+			func() string {
+				if vote.ResolvedAnswer != nil {
+					return *vote.ResolvedAnswer
+				}
+				return "<nil>"
+			}(),
+			elapsedMs,
+		)
+
+		if vote.ResolvedAnswer != nil {
+			decision := *vote.ResolvedAnswer
+			span.SetAttributes(
+				attribute.String("decision", decision),
+				attribute.String("decision.source", "team_vote"),
+				attribute.Int("poll.final_attempt", attempt),
+				attribute.Int64("poll.total_elapsed_ms", time.Since(hookStart).Milliseconds()),
+			)
+			span.AddEvent("vote_resolved", trace.WithAttributes(attribute.String("answer", decision)))
+			util.DebugLog("[permission-request] resolved toolUseId=%s answer=%s attempt=%d", toolUseId, decision, attempt)
+			if strings.EqualFold(decision, "deny") {
+				span.SetStatus(codes.Error, "permission denied by team")
+				out, _ := json.Marshal(map[string]interface{}{
+					"decision": "deny",
+					"reason":   "Team voted to deny this operation.",
+				})
+				os.Stdout.Write(out)
+				os.Exit(1)
+			}
+			// Allow (or any answer that isn't "deny")
+			os.Exit(0)
+		}
+	}
+
+	// Timeout — allow by default so Claude isn't stuck indefinitely.
+	span.SetAttributes(
+		attribute.String("decision", "allow"),
+		attribute.String("decision.source", "timeout"),
+		attribute.Int("poll.total_attempts", attempt),
+		attribute.Int64("poll.total_elapsed_ms", time.Since(hookStart).Milliseconds()),
+	)
+	span.AddEvent("permission_timed_out")
+	util.DebugLog("[permission-request] vote timed out after %d polls, allowing by default toolUseId=%s", attempt, toolUseId)
+	os.Exit(0)
+}
+
+func handleHookPreCompact() {
+	stdinData, sf, _, transcriptPath, _ := hookReadStdinAndFindSession()
+
+	var hookInput struct {
+		Trigger            string `json:"trigger"`             // "auto" | "manual"
+		CustomInstructions string `json:"custom_instructions"` // user's compact instructions, if any
+	}
+	json.Unmarshal(stdinData, &hookInput)
+
+	_, span := telemetry.Tracer().Start(context.Background(), "vibecast.compact",
+		trace.WithAttributes(
+			attribute.String("stream.id", sf.StreamID),
+			attribute.String("compact.trigger", hookInput.Trigger),
+		))
+	// Span ends in post-compact — we stash the span context so it can be resumed.
+	// For simplicity we just end the start span here and emit a separate end span in post-compact.
+	span.End()
+
+	p := map[string]interface{}{
+		"streamId":  sf.StreamID,
+		"type":      "metadata",
+		"subtype":   "pre_compact",
+		"trigger":   hookInput.Trigger,
+		"timestamp": time.Now().Unix(),
+	}
+	if hookInput.CustomInstructions != "" {
+		p["customInstructions"] = hookInput.CustomInstructions
+	}
+	if tl := readTranscriptIncrement(sf.StreamID, transcriptPath); len(tl) > 0 {
+		p["transcriptLines"] = tl
+	}
+
+	payload, _ := json.Marshal(p)
+	HookPostMetadata(sf, payload)
+	os.Exit(0)
+}
+
+func handleHookPostCompact() {
+	stdinData, sf, _, transcriptPath, _ := hookReadStdinAndFindSession()
+
+	var hookInput struct {
+		Summary string `json:"summary"` // the compact summary text Claude produced
+	}
+	json.Unmarshal(stdinData, &hookInput)
+
+	_, span := telemetry.Tracer().Start(context.Background(), "vibecast.compact.end",
+		trace.WithAttributes(
+			attribute.String("stream.id", sf.StreamID),
+			attribute.Bool("has_summary", hookInput.Summary != ""),
+		))
+	span.End()
+
+	p := map[string]interface{}{
+		"streamId":  sf.StreamID,
+		"type":      "metadata",
+		"subtype":   "post_compact",
+		"timestamp": time.Now().Unix(),
+	}
+	if hookInput.Summary != "" {
+		// Truncate to avoid huge payloads — first 500 chars is plenty for the activity log.
+		summary := hookInput.Summary
+		if len(summary) > 500 {
+			summary = summary[:500] + "…"
+		}
+		p["summary"] = summary
+	}
+	if tl := readTranscriptIncrement(sf.StreamID, transcriptPath); len(tl) > 0 {
+		p["transcriptLines"] = tl
+	}
+
 	payload, _ := json.Marshal(p)
 	HookPostMetadata(sf, payload)
 	os.Exit(0)

@@ -3,13 +3,16 @@ package broadcast
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +26,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[A-Za-z]|[^[]|][^\x07]*\x07)`)
@@ -217,17 +221,55 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 
 	// Goroutine: periodic terminal snapshot via tmux capture-pane
 	// Also handles auto-answering the Claude Code workspace trust dialog in job mode
-	// by checking the rendered screen text on each capture.
+	// and detects the "session is too large" context-size menu to broadcast as a vote card.
 	jobMode := os.Getenv("AGENTICS_JOB_MODE") == "1"
 	trustAnsweredSnap := false
+	// Track posted alp_pane question so we only post once per session-size menu appearance.
+	postedPaneQuestionId := ""
+	// Strip ANSI escape codes for plain-text detection (selected menu items have color codes
+	// between every word, breaking strings.Contains on the raw -e capture output).
+	ansiStripRe := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+	// Rolling debug capture directory — keeps the last 10 pane snapshots on disk so they
+	// can be inspected after the fact without needing to re-run the session.
+	// Location: $VIBECAST_HOME/.vibecast/debug/captures/ (or ~/.vibecast/debug/captures/)
+	vibecastHome := os.Getenv("VIBECAST_HOME")
+	if vibecastHome == "" {
+		vibecastHome, _ = os.UserHomeDir()
+	}
+	captureDebugDir := filepath.Join(vibecastHome, ".vibecast", "debug", "captures")
+	os.MkdirAll(captureDebugDir, 0755)
+
+	// savePaneCapture writes a timestamped plain-text capture file and prunes to 10 files.
+	savePaneCapture := func(plain string) {
+		name := fmt.Sprintf("%d-%s.txt", time.Now().UnixNano(), streamID)
+		path := filepath.Join(captureDebugDir, name)
+		os.WriteFile(path, []byte(plain), 0644)
+
+		// Prune: keep only the 10 most recent files (sorted by name = sorted by time).
+		entries, err := os.ReadDir(captureDebugDir)
+		if err != nil || len(entries) <= 10 {
+			return
+		}
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if !e.IsDir() {
+				names = append(names, e.Name())
+			}
+		}
+		sort.Strings(names)
+		for _, old := range names[:len(names)-10] {
+			os.Remove(filepath.Join(captureDebugDir, old))
+		}
+	}
+	snapSchemeBase := "https"
+	if util.IsLocalHost(serverHost) {
+		snapSchemeBase = "http"
+	}
 
 	go func() {
 		snapTmuxTarget := "vibecast-" + streamID + ":" + paneId
-		snapScheme := "https"
-		if util.IsLocalHost(serverHost) {
-			snapScheme = "http"
-		}
-		snapshotURL := fmt.Sprintf("%s://%s/_relay/snapshot", snapScheme, serverHost)
+		snapshotURL := fmt.Sprintf("%s://%s/_relay/snapshot", snapSchemeBase, serverHost)
 
 		postSnapshot := func() {
 			out, err := tmuxCmd("capture-pane", "-p", "-e", "-t", snapTmuxTarget).Output()
@@ -235,9 +277,10 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 				logDebug("[broadcast] capture-pane error: %v\n", err)
 				return
 			}
+			rendered := string(out)
+
 			// In job mode, check for the workspace trust dialog in the rendered screen.
 			if jobMode && !trustAnsweredSnap {
-				rendered := string(out)
 				if strings.Contains(rendered, "Quick safety check") {
 					allowedDir := os.Getenv("VIBECAST_ALLOWED_DIRECTORIES")
 					_, span := telemetry.Tracer().Start(
@@ -263,9 +306,62 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 					span.End()
 				}
 			}
+
+			// Compute plain (ANSI-stripped) text once for all detection below.
+			plain := ansiStripRe.ReplaceAllString(rendered, "")
+
+			// Save a rolling debug capture (plain text, last 10) for post-hoc inspection.
+			savePaneCapture(plain)
+
+			// Detect the "session is too large" context-size menu and broadcast it as a vote
+			// card so viewers can choose how Claude should continue. This menu appears at
+			// Claude startup on resumed large sessions and is not backed by any hook.
+			// Use ANSI-stripped text for detection — the selected menu item has color codes
+			// injected between every word, breaking plain strings.Contains on raw output.
+			// Runs in both job mode and standalone so viewers always get the vote card.
+			if postedPaneQuestionId == "" {
+				if strings.Contains(plain, "Resume from summary") &&
+					strings.Contains(plain, "Resume full session") {
+
+					// Extract the token-count line for a descriptive question text.
+					// Format: "This session is <time> old and <N>k tokens."
+					// Fall back to a generic label if the line isn't found.
+					sessionSizeRe := regexp.MustCompile(`This session is [^\n]+tokens`)
+					match := sessionSizeRe.FindString(plain)
+					if match == "" {
+						match = "Session too large"
+					}
+					idSource := fmt.Sprintf("session-size:%s:%s", streamID, match)
+					hash := sha256.Sum256([]byte(idSource))
+					paneQuestionId := fmt.Sprintf("alp-pane-%x", hash[:8])
+
+					question := fmt.Sprintf("%s — how should Claude continue?", match)
+					options := []string{"Resume from summary", "Resume full session as-is"}
+
+					payload, _ := json.Marshal(map[string]interface{}{
+						"streamId":       streamID,
+						"type":           "metadata",
+						"subtype":        "alp_pane",
+						"paneQuestionId": paneQuestionId,
+						"question":       question,
+						"options":        options,
+						"timestamp":      time.Now().Unix(),
+					})
+					metaURL := fmt.Sprintf("%s://%s/api/lives/metadata", snapSchemeBase, serverHost)
+					if resp, err := http.Post(metaURL, "application/json", bytes.NewReader(payload)); err == nil {
+						resp.Body.Close()
+						postedPaneQuestionId = paneQuestionId
+						logDebug("[broadcast] alp_pane posted paneQuestionId=%s\n", paneQuestionId)
+						// Injection is handled by the unified answer injection loop below.
+					} else {
+						logDebug("[broadcast] alp_pane metadata post error: %v\n", err)
+					}
+				}
+			}
+
 			body, _ := json.Marshal(map[string]string{
 				"streamId": streamID,
-				"snapshot": string(out),
+				"snapshot": rendered,
 			})
 			resp, err := http.Post(snapshotURL, "application/json", bytes.NewReader(body))
 			if err != nil {
@@ -297,6 +393,160 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 			}
 		}
 	}()
+
+	// Goroutine: unified answer injection loop (job mode only).
+	// Polls the server for the current pending question's resolved answer and injects
+	// the answer into Claude's pane via tmux send-keys.
+	// Covers both AskUserQuestion (tool-backed) and alp_pane (pane-detected) questions.
+	if jobMode {
+		go func() {
+			type pendingAnswerResponse struct {
+				QuestionID   *string  `json:"questionId"`
+				QuestionType string   `json:"questionType"`
+				Options      []string `json:"options"`
+				Answer       *string  `json:"answer"`
+			}
+			injectionTarget := "vibecast-" + streamID + ":" + paneId + ".0"
+			lastInjectedQuestionID := ""
+			pollURL := fmt.Sprintf("%s://%s/api/lives/sessions/%s/pending-answer",
+				snapSchemeBase, serverHost, streamID)
+			ticker := time.NewTicker(3 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					_, pollSpan := telemetry.Tracer().Start(context.Background(), "vibecast.answer.poll",
+						trace.WithAttributes(
+							attribute.String("stream.id", streamID),
+							attribute.String("poll.url", pollURL),
+						))
+					resp, err := http.Get(pollURL)
+					if err != nil {
+						pollSpan.RecordError(err)
+						pollSpan.End()
+						logDebug("[answer] poll error: %v\n", err)
+						continue
+					}
+					var r pendingAnswerResponse
+					json.NewDecoder(resp.Body).Decode(&r)
+					resp.Body.Close()
+
+					hasQuestion := r.QuestionID != nil && *r.QuestionID != ""
+					hasAnswer := r.Answer != nil
+					pollSpan.SetAttributes(
+						attribute.Bool("poll.has_question", hasQuestion),
+						attribute.Bool("poll.has_answer", hasAnswer),
+						attribute.String("poll.question_type", r.QuestionType),
+					)
+					if hasQuestion {
+						pollSpan.SetAttributes(attribute.String("poll.question_id", *r.QuestionID))
+					}
+					pollSpan.End()
+
+					if !hasQuestion || !hasAnswer {
+						continue
+					}
+					qID := *r.QuestionID
+					answer := *r.Answer
+					if qID == lastInjectedQuestionID {
+						continue
+					}
+					lastInjectedQuestionID = qID
+					logDebug("[answer] injecting answer %q for questionId=%s type=%s\n", answer, qID, r.QuestionType)
+
+					_, injectSpan := telemetry.Tracer().Start(context.Background(), "vibecast.answer.inject",
+						trace.WithAttributes(
+							attribute.String("stream.id", streamID),
+							attribute.String("question.id", qID),
+							attribute.String("question.type", r.QuestionType),
+							attribute.String("answer.preview", func() string {
+								if len(answer) > 80 { return answer[:80] }
+								return answer
+							}()),
+						))
+
+					if r.QuestionType == "permission" {
+						// Claude Code native file-create/overwrite confirmation TUI.
+						// Options are ["Allow", "Deny"] (or similar). The TUI is a BubbleTea
+						// selectlist: "1. Yes  2. Yes, and allow settings  3. No".
+						// Allow → press "1" + Enter; Deny → press "3" + Enter.
+						key := "1"
+						if strings.EqualFold(answer, "deny") || strings.EqualFold(answer, "no") {
+							key = "3"
+						}
+						injectSpan.SetAttributes(attribute.String("inject.method", "permission"), attribute.String("inject.key", key))
+						tmuxCmd("send-keys", "-t", injectionTarget, key).Run()
+						time.Sleep(100 * time.Millisecond)
+						tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
+						logDebug("[answer] permission injected key=%s for answer=%s\n", key, answer)
+					} else if r.QuestionType == "alp_pane" {
+						// Numbered menu: map answer label to 1-based digit.
+						digit := "1"
+						for i, opt := range r.Options {
+							if strings.EqualFold(opt, answer) {
+								digit = fmt.Sprintf("%d", i+1)
+								break
+							}
+						}
+						tmuxCmd("send-keys", "-t", injectionTarget, digit).Run()
+						time.Sleep(100 * time.Millisecond)
+						tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
+						injectSpan.SetAttributes(attribute.String("inject.method", "alp_pane"), attribute.String("inject.digit", digit))
+						logDebug("[answer] alp_pane injected digit=%s\n", digit)
+					} else {
+						// Tool question (AskUserQuestion / AskFollowupQuestion).
+						// Answer may be a single option label or a multi-step Q&A block
+						// (paragraphs separated by \n\n, each "question\nanswer").
+						paragraphs := strings.Split(answer, "\n\n")
+						isMultiStep := len(paragraphs) > 1 && len(r.Options) == 0
+						if isMultiStep {
+							injectSpan.SetAttributes(attribute.String("inject.method", "multi_step"), attribute.Int("inject.steps", len(paragraphs)))
+							for _, para := range paragraphs {
+								lines := strings.SplitN(strings.TrimSpace(para), "\n", 2)
+								if len(lines) < 2 {
+									continue
+								}
+								stepAnswer := strings.TrimSpace(lines[1])
+								tmuxCmd("send-keys", "-t", injectionTarget, "-l", "--", stepAnswer).Run()
+								time.Sleep(200 * time.Millisecond)
+								tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
+								time.Sleep(300 * time.Millisecond)
+							}
+							// Tab to Submit button then confirm
+							tmuxCmd("send-keys", "-t", injectionTarget, "Tab").Run()
+							time.Sleep(100 * time.Millisecond)
+							tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
+						} else if len(r.Options) > 0 {
+							// Single-step with known options: navigate BubbleTea selectlist.
+							targetIdx := 1
+							for i, opt := range r.Options {
+								if strings.EqualFold(opt, answer) {
+									targetIdx = i + 1
+									break
+								}
+							}
+							injectSpan.SetAttributes(attribute.String("inject.method", "select_list"), attribute.Int("inject.target_idx", targetIdx))
+							for i := 1; i < targetIdx; i++ {
+								tmuxCmd("send-keys", "-t", injectionTarget, "Down").Run()
+								time.Sleep(100 * time.Millisecond)
+							}
+							tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
+						} else {
+							// Free text: type directly.
+							injectSpan.SetAttributes(attribute.String("inject.method", "free_text"))
+							tmuxCmd("send-keys", "-t", injectionTarget, "-l", "--", answer).Run()
+							time.Sleep(100 * time.Millisecond)
+							tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
+						}
+						logDebug("[answer] tool question injected for questionId=%s\n", qID)
+					}
+					injectSpan.End()
+				}
+			}
+		}()
+	}
 
 	// Goroutine: drain metaCh and send metadata text frames to server
 	go func() {

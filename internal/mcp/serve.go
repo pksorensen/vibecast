@@ -1,11 +1,16 @@
 package mcp
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +23,100 @@ import (
 	"github.com/pksorensen/vibecast/internal/session"
 	"github.com/pksorensen/vibecast/internal/types"
 )
+
+// skipDirs are directory names to exclude from workspace zips.
+var skipDirs = map[string]bool{
+	"node_modules": true,
+	".git":         true,
+	".next":        true,
+	"__pycache__":  true,
+	".venv":        true,
+	"venv":         true,
+	"dist":         true,
+	"build":        true,
+}
+
+// uploadWorkspaceArchive creates a zip of the workspace and uploads it to the server.
+// It tries `git archive HEAD` first (clean, only committed files). Falls back to
+// a full directory zip excluding common large dirs.
+func uploadWorkspaceArchive(cwd, serverHost, scheme, streamID string) {
+	var zipData []byte
+
+	// Try git archive first — only works if there are commits
+	if out, err := exec.Command("git", "-C", cwd, "archive", "--format=zip", "HEAD").Output(); err == nil && len(out) > 0 {
+		zipData = out
+		fmt.Fprintf(os.Stderr, "[workspace-archive] git archive ok (%d bytes)\n", len(zipData))
+	} else {
+		// Fall back to full directory zip
+		var buf bytes.Buffer
+		w := zip.NewWriter(&buf)
+		_ = filepath.Walk(cwd, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			rel, _ := filepath.Rel(cwd, path)
+			if rel == "." {
+				return nil
+			}
+			// Skip large/irrelevant dirs
+			parts := strings.Split(rel, string(filepath.Separator))
+			for _, part := range parts {
+				if skipDirs[part] {
+					if info.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+			}
+			if info.IsDir() {
+				return nil
+			}
+			// Skip files over 10MB
+			if info.Size() > 10*1024*1024 {
+				return nil
+			}
+			f, err := w.Create(rel)
+			if err != nil {
+				return nil
+			}
+			src, err := os.Open(path)
+			if err != nil {
+				return nil
+			}
+			defer src.Close()
+			_, _ = io.Copy(f, src)
+			return nil
+		})
+		w.Close()
+		zipData = buf.Bytes()
+		fmt.Fprintf(os.Stderr, "[workspace-archive] dir zip ok (%d bytes)\n", len(zipData))
+	}
+
+	if len(zipData) == 0 {
+		fmt.Fprintf(os.Stderr, "[workspace-archive] no data to upload\n")
+		return
+	}
+
+	uploadURL := fmt.Sprintf("%s://%s/api/lives/sessions/%s/workspace-archive", scheme, serverHost, streamID)
+	req, err := http.NewRequest("PUT", uploadURL, bytes.NewReader(zipData))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[workspace-archive] build request error: %v\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/zip")
+	if token := os.Getenv("AGENTICS_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[workspace-archive] upload error: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	fmt.Fprintf(os.Stderr, "[workspace-archive] upload status: %d\n", resp.StatusCode)
+}
 
 func execCommand(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).Output()
@@ -365,13 +464,56 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 		var gitPushError string
 		if os.Getenv("AGENTICS_AUTO_GIT") == "1" {
 			cwd, _ := os.Getwd()
+
+			// Update origin to the current server URL before pushing.
+			// Workspaces are reused across retries; the origin URL may have a stale
+			// port from the first clone (e.g. localhost:36709) while the live server
+			// is now on a different port. AGENTICS_BASE_URL always holds the current
+			// server base URL set by the runner at startup.
+			if baseURL := os.Getenv("AGENTICS_BASE_URL"); baseURL != "" {
+				if rawOrigin, err := execCommand("git", "-C", cwd, "remote", "get-url", "origin"); err == nil {
+					rawOrigin = strings.TrimSpace(rawOrigin)
+					if parsedOrigin, err := url.Parse(rawOrigin); err == nil {
+						if parsedBase, err := url.Parse(baseURL); err == nil {
+							parsedOrigin.Host = parsedBase.Host
+							parsedOrigin.Scheme = parsedBase.Scheme
+							// Prefer AGENTICS_REPO_TOKEN (project repo.git token) over AGENTICS_TOKEN
+							// (runner API token) — the git server validates against the repo token, not the runner token.
+							token := os.Getenv("AGENTICS_REPO_TOKEN")
+							if token == "" {
+								token = os.Getenv("AGENTICS_TOKEN")
+							}
+							if token != "" {
+								parsedOrigin.User = url.UserPassword("x-access-token", token)
+							}
+							newOrigin := parsedOrigin.String()
+							exec.Command("git", "-C", cwd, "remote", "set-url", "origin", newOrigin).Run()
+							fmt.Fprintf(os.Stderr, "auto-git: updated origin host to %s\n", parsedBase.Host)
+						}
+					}
+				}
+			}
+
 			branch := "main"
 			if out, err := execCommand("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
 				if b := strings.TrimSpace(out); b != "" && b != "HEAD" {
 					branch = b
 				}
 			}
-			pushCmd := exec.Command("git", "-C", cwd, "push", "origin", branch)
+			// Disable credential helpers so the token embedded in the remote URL
+			// is used directly — GIT_ASKPASS (VS Code) or other helpers must not override it.
+			pushCmd := exec.Command("git", "-c", "credential.helper=", "-C", cwd, "push", "origin", branch)
+			pushEnv := make([]string, 0, len(os.Environ()))
+			for _, e := range os.Environ() {
+				if strings.HasPrefix(e, "GIT_ASKPASS=") ||
+					strings.HasPrefix(e, "VSCODE_GIT_ASKPASS") ||
+					strings.HasPrefix(e, "GIT_TERMINAL_PROMPT=") {
+					continue
+				}
+				pushEnv = append(pushEnv, e)
+			}
+			pushEnv = append(pushEnv, "GIT_TERMINAL_PROMPT=0")
+			pushCmd.Env = pushEnv
 			if pushOut, err := pushCmd.CombinedOutput(); err != nil {
 				gitPushError = fmt.Sprintf("push failed: %v\n%s", err, strings.TrimSpace(string(pushOut)))
 				fmt.Fprintf(os.Stderr, "auto-git: %s\n", gitPushError)
@@ -389,6 +531,29 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 			}
 			if out, err := execCommand("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
 				gitBranch = strings.TrimSpace(out)
+			}
+		}
+
+		// Upload workspace archive for debugging and session restore
+		{
+			cwd, _ := os.Getwd()
+			sf := session.FindSessionByWorkspace(cwd)
+			if sf == nil {
+				sf = session.FindActiveSession()
+			}
+			if sf != nil && sf.StreamID != "" {
+				serverHost := sf.ServerHost
+				if serverHost == "" {
+					serverHost = os.Getenv("AGENTICS_SERVER")
+					if serverHost == "" {
+						serverHost = "agentics.dk"
+					}
+				}
+				scheme := "https"
+				if strings.HasPrefix(serverHost, "localhost") || strings.HasPrefix(serverHost, "127.") {
+					scheme = "http"
+				}
+				go uploadWorkspaceArchive(cwd, serverHost, scheme, sf.StreamID)
 			}
 		}
 

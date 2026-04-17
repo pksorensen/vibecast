@@ -46,6 +46,9 @@ func Execute() {
 		case "sync":
 			RunSync()
 			return
+		case "stop-broadcast":
+			RunStopBroadcast()
+			return
 		case "select-workspace":
 			stream.SelectWorkspaceWindow()
 			return

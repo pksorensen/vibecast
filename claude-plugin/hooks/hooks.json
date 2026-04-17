@@ -95,6 +95,30 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${VIBECAST_BIN:-${CLAUDE_PLUGIN_ROOT}/../vibecast} hook pre-compact",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${VIBECAST_BIN:-${CLAUDE_PLUGIN_ROOT}/../vibecast} hook post-compact",
+            "async": true
+          }
+        ]
+      }
     ]
   }
 }
