@@ -33,7 +33,7 @@ type ChatMsg struct {
 	Type      string `json:"type"`
 	Username  string `json:"username,omitempty"`
 	Text      string `json:"text,omitempty"`
-	StreamID  string `json:"streamId,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
 	Timestamp int64  `json:"timestamp,omitempty"`
 	Count     int    `json:"count,omitempty"`
 }
@@ -70,7 +70,8 @@ type PaneInfo struct {
 // SharedStatus holds shared mutable state for the control server and TUI.
 type SharedStatus struct {
 	Mu              sync.Mutex
-	StreamID        string
+	SessionID       string
+	BroadcastID     string
 	URL             string
 	PinCode         string
 	Viewers         int
@@ -129,7 +130,8 @@ func (s *SharedStatus) BroadcastEvent(event string) {
 
 // SessionFile represents the on-disk session state file.
 type SessionFile struct {
-	StreamID        string                 `json:"streamId"`
+	SessionID       string                 `json:"sessionId"`
+	BroadcastID     string                 `json:"broadcastId,omitempty"`
 	ServerHost      string                 `json:"serverHost"`
 	Workspace       string                 `json:"workspace"`
 	Owner           string                 `json:"owner,omitempty"`
@@ -152,7 +154,8 @@ type TransTickMsg struct{}
 type SplashTickMsg struct{}
 
 type StreamStartedMsg struct {
-	StreamID        string
+	SessionID       string
+	BroadcastID     string
 	URL             string
 	PID             int
 	TtydPort        int

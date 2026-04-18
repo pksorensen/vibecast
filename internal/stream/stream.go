@@ -265,7 +265,7 @@ func BindFKeys(sessionName string) {
 
 // SpawnFKeyBar splits a tmux window and runs fkeybar in the bottom pane (2 lines).
 // Returns the tmux pane ID of the fkeybar pane.
-func SpawnFKeyBar(sessionName, windowName, streamID string) string {
+func SpawnFKeyBar(sessionName, windowName, sessionID string) string {
 	target := sessionName + ":" + windowName
 	vibecastPath, err := os.Executable()
 	if err != nil {
@@ -275,7 +275,7 @@ func SpawnFKeyBar(sessionName, windowName, streamID string) string {
 
 	// Split window vertically, run fkeybar in bottom pane (2 lines high)
 	// Pass TERM_PROGRAM so fkeybar can detect VS Code and show ^b prefix
-	fkeybarCmd := vibecastPath + " fkeybar --stream-id " + streamID
+	fkeybarCmd := vibecastPath + " fkeybar --session-id " + sessionID
 	if tp := os.Getenv("TERM_PROGRAM"); tp != "" {
 		fkeybarCmd = "TERM_PROGRAM=" + tp + " " + fkeybarCmd
 	}
@@ -315,7 +315,7 @@ func paneDimensions() (string, string) {
 }
 
 // SpawnPane creates a new tmux window, starts ttyd, launches Claude, and begins broadcast relay.
-func SpawnPane(sessionName, streamID, paneId, name string, status *types.SharedStatus, claudeResumeID string) (*types.PaneInfo, error) {
+func SpawnPane(sessionName, sessionID, paneId, name string, status *types.SharedStatus, claudeResumeID string) (*types.PaneInfo, error) {
 	claudeSessionID := util.GenerateUUIDv4()
 	if claudeResumeID != "" {
 		claudeSessionID = claudeResumeID
@@ -352,7 +352,7 @@ func SpawnPane(sessionName, streamID, paneId, name string, status *types.SharedS
 	// the Claude pane. Broadcaster F-key bindings remain active at the tmux session
 	// level regardless.
 	if os.Getenv("VIBECAST_STREAM_FULL_WINDOW") == "1" {
-		fkeybarPaneID := SpawnFKeyBar(sessionName, paneId, streamID)
+		fkeybarPaneID := SpawnFKeyBar(sessionName, paneId, sessionID)
 		if fkeybarPaneID != "" && status != nil {
 			status.Mu.Lock()
 			status.FKeyBarPaneIDs = append(status.FKeyBarPaneIDs, fkeybarPaneID)
@@ -400,7 +400,7 @@ func SpawnPane(sessionName, streamID, paneId, name string, status *types.SharedS
 
 	metaCh := make(chan []byte, 16)
 
-	go broadcast.ConnectBroadcast(streamID, status, metaCh, ttydPort, paneId)
+	go broadcast.ConnectBroadcast(sessionID, status, metaCh, ttydPort, paneId)
 
 	// Update pane tracking in SharedStatus
 	if status != nil {
@@ -436,26 +436,31 @@ func streamError(span trace.Span, err error) types.StreamErrorMsg {
 }
 
 // StartStream creates a new broadcast session.
-func StartStream(promptSharing, shareProjectInfo bool, projectName string, resumeStreamID string, claudeResumeID string, status *types.SharedStatus) tea.Cmd {
+func StartStream(promptSharing, shareProjectInfo bool, projectName string, resumeSessionID string, broadcastID string, claudeResumeID string, status *types.SharedStatus) tea.Cmd {
 	return func() tea.Msg {
-		streamID := resumeStreamID
-		if streamID == "" {
-			streamID = util.GenerateStreamID()
+		sessionID := resumeSessionID
+		if sessionID == "" {
+			sessionID = util.GenerateSessionID()
+		}
+		if broadcastID == "" {
+			broadcastID = sessionID
 		}
 
 		streamCtx, span := telemetry.Tracer().Start(context.Background(), "vibecast.stream.start",
 			trace.WithAttributes(
-				attribute.String("stream.id", streamID),
-				attribute.Bool("stream.resumed", resumeStreamID != ""),
+				attribute.String("session.id", sessionID),
+				attribute.String("broadcast.id", broadcastID),
+				attribute.Bool("stream.resumed", resumeSessionID != ""),
 			))
 		defer span.End()
 
-		sessionName := "vibecast-" + streamID
+		sessionName := "vibecast-" + sessionID
 		serverHost := util.GetServerHost()
 		span.SetAttributes(attribute.String("server.host", serverHost))
 
 		status.Mu.Lock()
 		status.ServerHost = serverHost
+		status.BroadcastID = broadcastID
 		status.Mu.Unlock()
 
 		session.CleanStaleSessions()
@@ -472,7 +477,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 
 		// Create streaming tmux session with "info" window running fkeybar --info
 		vibecastPath, _ := os.Executable()
-		infoCmd := vibecastPath + " fkeybar --info --stream-id " + streamID
+		infoCmd := vibecastPath + " fkeybar --info --session-id " + sessionID
 		if tp := os.Getenv("TERM_PROGRAM"); tp != "" {
 			infoCmd = "TERM_PROGRAM=" + tp + " " + infoCmd
 		}
@@ -488,7 +493,8 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 			return streamError(span, fmt.Errorf("failed to create tmux session: %w", err))
 		}
 
-		exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_STREAM_ID", streamID).Run()
+		exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_SESSION_ID", sessionID).Run()
+		exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_BROADCAST_ID", broadcastID).Run()
 		// Propagate W3C traceparent for this stream so hook subprocesses create child spans.
 		if tp := telemetry.TraceparentFromContext(streamCtx); tp != "" {
 			exec.Command("tmux", "set-environment", "-t", sessionName, "TRACEPARENT", tp).Run()
@@ -519,14 +525,14 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 				exec.Command("tmux", "set-environment", "-t", sessionName, key, val).Run()
 			}
 		}
-		// Append vibecast.stream_id to OTEL_RESOURCE_ATTRIBUTES so Claude's telemetry
-		// (which runs in this tmux session) gets associated with the correct stream in
+		// Append vibecast.session_id to OTEL_RESOURCE_ATTRIBUTES so Claude's telemetry
+		// (which runs in this tmux session) gets associated with the correct session in
 		// Next.js. Must happen AFTER the OTEL_RESOURCE_ATTRIBUTES propagation above.
 		{
-			streamAttr := "vibecast.stream_id=" + streamID
-			updated := streamAttr
+			sessionAttr := "vibecast.session_id=" + sessionID
+			updated := sessionAttr
 			if existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES"); existing != "" {
-				updated = existing + "," + streamAttr
+				updated = existing + "," + sessionAttr
 			}
 			os.Setenv("OTEL_RESOURCE_ATTRIBUTES", updated)
 			exec.Command("tmux", "set-environment", "-t", sessionName, "OTEL_RESOURCE_ATTRIBUTES", updated).Run()
@@ -621,8 +627,9 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 			apiURL := fmt.Sprintf("%s://%s/api/lives/session-event", scheme, serverHost)
 
 			eventBody := map[string]interface{}{
-				"streamId": streamID,
-				"event":    "start",
+				"sessionId":   sessionID,
+				"broadcastId": broadcastID,
+				"event":       "start",
 			}
 			if token, claims, err := auth.GetValidToken(); err == nil && token != "" {
 				eventBody["user"] = claims
@@ -680,7 +687,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		status.PinCode = pinCode
 		status.Mu.Unlock()
 
-		mainPane, err := SpawnPane(sessionName, streamID, "main", "Main", status, claudeResumeID)
+		mainPane, err := SpawnPane(sessionName, sessionID, "main", "Main", status, claudeResumeID)
 		if err != nil {
 			return streamError(span, fmt.Errorf("failed to spawn main pane: %w", err))
 		}
@@ -696,7 +703,8 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		projName := util.GetProjectName(projectName)
 		projOwner := util.GetProjectOwner()
 		sf := types.SessionFile{
-			StreamID:        streamID,
+			SessionID:       sessionID,
+			BroadcastID:     broadcastID,
 			ServerHost:      serverHost,
 			Workspace:       cwd,
 			Owner:           projOwner,
@@ -739,10 +747,11 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 			metaCh <- capsJson
 		}()
 
-		viewerURL := util.BuildViewerURL(serverHost, streamID)
+		viewerURL := util.BuildViewerURL(serverHost, broadcastID)
 
 		return types.StreamStartedMsg{
-			StreamID:        streamID,
+			SessionID:       sessionID,
+			BroadcastID:     broadcastID,
 			URL:             viewerURL,
 			PID:             mainPane.TtydPID,
 			TtydPort:        mainPane.TtydPort,
@@ -755,12 +764,12 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 }
 
 // ResumeStream resumes a previous broadcast session.
-func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
+func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 	return func() tea.Msg {
-		sessionName := "vibecast-" + streamID
+		sessionName := "vibecast-" + sessionID
 
 		_, span := telemetry.Tracer().Start(context.Background(), "vibecast.stream.resume",
-			trace.WithAttributes(attribute.String("stream.id", streamID)))
+			trace.WithAttributes(attribute.String("session.id", sessionID)))
 		defer span.End()
 
 		serverHost := util.GetServerHost()
@@ -794,8 +803,8 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 			}
 			apiURL := fmt.Sprintf("%s://%s/api/lives/session-event", scheme, serverHost)
 			eventBody := map[string]interface{}{
-				"streamId": streamID,
-				"event":    "start",
+				"sessionId": sessionID,
+				"event":     "start",
 			}
 			if token, claims, err := auth.GetValidToken(); err == nil && token != "" {
 				eventBody["user"] = claims
@@ -851,12 +860,12 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 
 		tmuxAlive := exec.Command("tmux", "has-session", "-t", sessionName).Run() == nil
 
-		sfPath := filepath.Join(session.SessionsDir(), streamID+".json")
+		sfPath := filepath.Join(session.SessionsDir(), sessionID+".json")
 		sf, err := session.ReadSessionFile(sfPath)
 		if err != nil {
 			logDebug("[resume] no local session file — using server data\n")
 			sf = &types.SessionFile{
-				StreamID:   streamID,
+				SessionID:  sessionID,
 				ServerHost: serverHost,
 				Project:    serverProject,
 				Workspace:  serverWorkspace,
@@ -889,16 +898,16 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 			for k, v := range serverEnv {
 				exec.Command("tmux", "set-environment", "-t", sessionName, k, v).Run()
 			}
-			// Ensure vibecast.stream_id is in OTEL_RESOURCE_ATTRIBUTES
+			// Ensure vibecast.session_id is in OTEL_RESOURCE_ATTRIBUTES
 			{
-				streamAttr := "vibecast.stream_id=" + streamID
+				sessionAttr := "vibecast.session_id=" + sessionID
 				existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES")
 				if v, ok := serverEnv["OTEL_RESOURCE_ATTRIBUTES"]; ok && existing == "" {
 					existing = v
 				}
-				updated := streamAttr
+				updated := sessionAttr
 				if existing != "" {
-					updated = existing + "," + streamAttr
+					updated = existing + "," + sessionAttr
 				}
 				exec.Command("tmux", "set-environment", "-t", sessionName, "OTEL_RESOURCE_ATTRIBUTES", updated).Run()
 			}
@@ -930,7 +939,7 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 				time.Sleep(500 * time.Millisecond)
 
 				metaCh := make(chan []byte, 16)
-				go broadcast.ConnectBroadcast(streamID, status, metaCh, ttydPort, pe.PaneID)
+				go broadcast.ConnectBroadcast(sessionID, status, metaCh, ttydPort, pe.PaneID)
 
 				pane := &types.PaneInfo{
 					PaneId:          pe.PaneID,
@@ -955,21 +964,22 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 				return streamError(span, fmt.Errorf("failed to create tmux session: %w", err))
 			}
 
-			exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_STREAM_ID", streamID).Run()
+			exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_SESSION_ID", sessionID).Run()
+			exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_BROADCAST_ID", sf.BroadcastID).Run()
 			// Propagate OTEL env vars to the new tmux session
 			for k, v := range serverEnv {
 				exec.Command("tmux", "set-environment", "-t", sessionName, k, v).Run()
 			}
-			// Ensure vibecast.stream_id is in OTEL_RESOURCE_ATTRIBUTES
+			// Ensure vibecast.session_id is in OTEL_RESOURCE_ATTRIBUTES
 			{
-				streamAttr := "vibecast.stream_id=" + streamID
+				sessionAttr := "vibecast.session_id=" + sessionID
 				existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES")
 				if v, ok := serverEnv["OTEL_RESOURCE_ATTRIBUTES"]; ok && existing == "" {
 					existing = v
 				}
-				updated := streamAttr
+				updated := sessionAttr
 				if existing != "" {
-					updated = existing + "," + streamAttr
+					updated = existing + "," + sessionAttr
 				}
 				exec.Command("tmux", "set-environment", "-t", sessionName, "OTEL_RESOURCE_ATTRIBUTES", updated).Run()
 			}
@@ -985,7 +995,7 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 			BindFKeys(sessionName)
 
 			for _, pe := range paneEntries {
-				pane, err := SpawnPane(sessionName, streamID, pe.PaneID, pe.PaneID, status, pe.ClaudeSessionID)
+				pane, err := SpawnPane(sessionName, sessionID, pe.PaneID, pe.PaneID, status, pe.ClaudeSessionID)
 				if err != nil {
 					logDebug("[resume] failed to spawn pane %s: %v\n", pe.PaneID, err)
 					continue
@@ -997,7 +1007,7 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 		}
 
 		if mainPane == nil {
-			return streamError(span, fmt.Errorf("no valid panes found for stream %s", streamID))
+			return streamError(span, fmt.Errorf("no valid panes found for session %s", sessionID))
 		}
 
 		sf.PID = os.Getpid()
@@ -1031,10 +1041,15 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 			mainPane.MetaCh <- capsJson
 		}()
 
-		viewerURL := util.BuildViewerURL(serverHost, streamID)
+		resumeBroadcastID := sf.BroadcastID
+		if resumeBroadcastID == "" {
+			resumeBroadcastID = sessionID
+		}
+		viewerURL := util.BuildViewerURL(serverHost, resumeBroadcastID)
 
 		return types.StreamStartedMsg{
-			StreamID:        streamID,
+			SessionID:       sessionID,
+			BroadcastID:     resumeBroadcastID,
 			URL:             viewerURL,
 			PID:             mainPane.TtydPID,
 			TtydPort:        mainPane.TtydPort,
@@ -1048,10 +1063,10 @@ func ResumeStream(streamID string, status *types.SharedStatus) tea.Cmd {
 
 // StopStream stops the broadcast and cleans up.
 // Optional stopMessage and stopConclusion are passed to the server session-event endpoint.
-func StopStream(pid int, sessionName, streamID string, promptSharing bool, panes []types.PaneInfo, keepTmux bool, stopMessage ...string) tea.Cmd {
+func StopStream(pid int, sessionName, sessionID string, promptSharing bool, panes []types.PaneInfo, keepTmux bool, stopMessage ...string) tea.Cmd {
 	return func() tea.Msg {
 		_, span := telemetry.Tracer().Start(context.Background(), "vibecast.stream.stop",
-			trace.WithAttributes(attribute.String("stream.id", streamID)))
+			trace.WithAttributes(attribute.String("session.id", sessionID)))
 		defer span.End()
 
 		// Grace period: wait for final hooks (tool_use_end, assistant_response)
@@ -1074,8 +1089,8 @@ func StopStream(pid int, sessionName, streamID string, promptSharing bool, panes
 			}
 			apiURL := fmt.Sprintf("%s://%s/api/lives/session-event", scheme, host)
 			eventData := map[string]interface{}{
-				"streamId": streamID,
-				"event":    "end",
+				"sessionId": sessionID,
+				"event":     "end",
 			}
 			// Include message and conclusion if provided
 			if len(stopMessage) > 0 && stopMessage[0] != "" {
@@ -1124,9 +1139,9 @@ func StopStream(pid int, sessionName, streamID string, promptSharing bool, panes
 			)
 		}
 
-		session.DeleteSessionFile(streamID)
+		session.DeleteSessionFile(sessionID)
 
-		os.RemoveAll(hooks.TranscriptCursorDir(streamID))
+		os.RemoveAll(hooks.TranscriptCursorDir(sessionID))
 
 		for _, pane := range panes {
 			if pane.TtydPID > 0 {
@@ -1156,7 +1171,7 @@ func StopStream(pid int, sessionName, streamID string, promptSharing bool, panes
 }
 
 // ApproveImage sends an image approval/rejection to the server.
-func ApproveImage(streamID, imageID string, approved bool) {
+func ApproveImage(sessionID, imageID string, approved bool) {
 	sf := session.FindActiveSession()
 	if sf == nil {
 		return
@@ -1167,9 +1182,9 @@ func ApproveImage(streamID, imageID string, approved bool) {
 	}
 	url := fmt.Sprintf("%s://%s/api/lives/image-approve", scheme, sf.ServerHost)
 	payload, _ := json.Marshal(map[string]interface{}{
-		"streamId": streamID,
-		"imageId":  imageID,
-		"approved": approved,
+		"sessionId": sessionID,
+		"imageId":   imageID,
+		"approved":  approved,
 	})
 	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
 	if err != nil {

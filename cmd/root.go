@@ -56,21 +56,28 @@ func Execute() {
 	}
 
 	// Parse flags
-	var resumeStreamID string
+	var resumeSessionID string
+	var broadcastID string
 	var resumeMode bool
 	for i := 1; i < len(os.Args); i++ {
-		if os.Args[i] == "--stream-id" && i+1 < len(os.Args) {
-			resumeStreamID = os.Args[i+1]
+		if os.Args[i] == "--session-id" && i+1 < len(os.Args) {
+			resumeSessionID = os.Args[i+1]
 			break
 		}
+		if os.Args[i] == "--broadcast-id" && i+1 < len(os.Args) {
+			broadcastID = os.Args[i+1]
+		}
 		if os.Args[i] == "--resume" && i+1 < len(os.Args) {
-			resumeStreamID = util.ExtractStreamID(os.Args[i+1])
+			resumeSessionID = util.ExtractSessionID(os.Args[i+1])
 			resumeMode = true
 			break
 		}
 	}
-	if resumeStreamID == "" {
-		resumeStreamID = os.Getenv("STREAM_ID")
+	if resumeSessionID == "" {
+		resumeSessionID = os.Getenv("SESSION_ID")
+	}
+	if broadcastID == "" {
+		broadcastID = os.Getenv("BROADCAST_ID")
 	}
 	// Runner passes the prior Claude session ID so vibecast can resume it via --resume
 	claudeResumeID := os.Getenv("VIBECAST_RESUME_SESSION_ID")
@@ -93,7 +100,8 @@ func Execute() {
 
 	// Create a headless Bubble Tea program (no terminal, just message processing)
 	m := tui.WaitingModel(status)
-	m.ResumeStreamID = resumeStreamID
+	m.ResumeSessionID = resumeSessionID
+	m.BroadcastID = broadcastID
 	m.ResumeMode = resumeMode
 	m.ClaudeResumeID = claudeResumeID
 
@@ -186,17 +194,17 @@ func Execute() {
 		os.Exit(0)
 	}()
 
-	// Start chat connection goroutine — use the live stream ID once streaming starts.
+	// Start chat connection goroutine — use the live session ID once streaming starts.
 	go func() {
 		for i := 0; i < 60; i++ {
 			time.Sleep(2 * time.Second)
 			status.Mu.Lock()
-			chatStreamID := status.StreamID
+			chatSessionID := status.SessionID
 			status.Mu.Unlock()
-			if chatStreamID == "" {
-				chatStreamID = "default"
+			if chatSessionID == "" {
+				chatSessionID = "default"
 			}
-			broadcast.ConnectChat(chatStreamID, p)
+			broadcast.ConnectChat(chatSessionID, p)
 		}
 	}()
 
@@ -234,11 +242,11 @@ func Execute() {
 	// If not (user selected Quit), shut down.
 	status.Mu.Lock()
 	phase := status.Phase
-	streamID := status.StreamID
+	sessionID := status.SessionID
 	status.Mu.Unlock()
 
 	if phase == "live" || phase == "starting" {
-		streamingSession := "vibecast-" + streamID
+		streamingSession := "vibecast-" + sessionID
 		// Wait for streaming session to exist (may still be creating)
 		for i := 0; i < 30; i++ {
 			if exec.Command("tmux", "has-session", "-t", streamingSession).Run() == nil {

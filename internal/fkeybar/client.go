@@ -38,12 +38,13 @@ func NewClient() *Client {
 
 // StatusResponse holds the response from GET /status.
 type StatusResponse struct {
-	StreamID string `json:"streamId"`
-	URL      string `json:"url"`
-	PinCode  string `json:"pinCode"`
-	Viewers  int    `json:"viewers"`
-	Uptime   string `json:"uptime"`
-	Phase    string `json:"phase"`
+	SessionID   string `json:"sessionId"`
+	BroadcastID string `json:"broadcastId"`
+	URL         string `json:"url"`
+	PinCode     string `json:"pinCode"`
+	Viewers     int    `json:"viewers"`
+	Uptime      string `json:"uptime"`
+	Phase       string `json:"phase"`
 }
 
 // GetStatus fetches current status from the control socket.

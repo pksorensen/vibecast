@@ -43,7 +43,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if m.ApprovalIndex < len(m.PendingImages) {
 					img := m.PendingImages[m.ApprovalIndex]
-					go stream.ApproveImage(m.StreamID, img.ImageID, true)
+					go stream.ApproveImage(m.SessionID, img.ImageID, true)
 					m.PendingImages = append(m.PendingImages[:m.ApprovalIndex], m.PendingImages[m.ApprovalIndex+1:]...)
 					m.ImageApprovals--
 					if m.ApprovalIndex >= len(m.PendingImages) {
@@ -62,7 +62,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "x":
 				if m.ApprovalIndex < len(m.PendingImages) {
 					img := m.PendingImages[m.ApprovalIndex]
-					go stream.ApproveImage(m.StreamID, img.ImageID, false)
+					go stream.ApproveImage(m.SessionID, img.ImageID, false)
 					m.PendingImages = append(m.PendingImages[:m.ApprovalIndex], m.PendingImages[m.ApprovalIndex+1:]...)
 					m.ImageApprovals--
 					if m.ApprovalIndex >= len(m.PendingImages) {
@@ -89,16 +89,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.Phase = types.PhaseStopping
 				m.TransFrame = 0
 				m.TransDone = false
-				return m, tea.Batch(stream.StopStream(m.TtydPID, m.TmuxSession, m.StreamID, m.PromptSharing, m.Panes, m.ResumeMode), TransTick())
+				return m, tea.Batch(stream.StopStream(m.TtydPID, m.TmuxSession, m.SessionID, m.PromptSharing, m.Panes, m.ResumeMode), TransTick())
 			}
 			return m, tea.Quit
 		case "enter", " ":
 			if m.Phase == types.PhaseSplash && m.SplashDone {
-				if m.ResumeMode && m.ResumeStreamID != "" {
+				if m.ResumeMode && m.ResumeSessionID != "" {
 					m.Phase = types.PhaseStarting
 					m.TransFrame = 0
 					m.TransDone = false
-					return m, tea.Batch(m.Spinner.Tick, stream.ResumeStream(m.ResumeStreamID, m.Status), TransTick())
+					return m, tea.Batch(m.Spinner.Tick, stream.ResumeStream(m.ResumeSessionID, m.Status), TransTick())
 				}
 				m.Phase = types.PhaseMenu
 				m.TransFrame = 0
@@ -111,7 +111,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.Phase = types.PhaseStarting
 					m.TransFrame = 0
 					m.TransDone = false
-					return m, tea.Batch(m.Spinner.Tick, stream.StartStream(m.PromptSharing, m.ShareProjectInfo, m.ProjectName, m.ResumeStreamID, "", m.Status), TransTick())
+					return m, tea.Batch(m.Spinner.Tick, stream.StartStream(m.PromptSharing, m.ShareProjectInfo, m.ProjectName, m.ResumeSessionID, m.BroadcastID, "", m.Status), TransTick())
 				case 1:
 					m.ClaudeSessions = session.ScanClaudeSessions()
 					m.SessionIndex = 0
@@ -133,7 +133,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.Phase == types.PhaseSessions {
 				if len(m.ClaudeSessions) > 0 {
 					selected := m.ClaudeSessions[m.SessionIndex]
-					if m.StreamID != "" {
+					if m.SessionID != "" {
 						m.ClaudeSessionID = selected.SessionID
 						m.Phase = types.PhaseLive
 						return m, stream.RestartClaude(m.TmuxSession, true, selected.SessionID)
@@ -141,7 +141,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.Phase = types.PhaseStarting
 					m.TransFrame = 0
 					m.TransDone = false
-					return m, tea.Batch(m.Spinner.Tick, stream.StartStream(m.PromptSharing, m.ShareProjectInfo, m.ProjectName, m.ResumeStreamID, selected.SessionID, m.Status), TransTick())
+					return m, tea.Batch(m.Spinner.Tick, stream.StartStream(m.PromptSharing, m.ShareProjectInfo, m.ProjectName, m.ResumeSessionID, m.BroadcastID, selected.SessionID, m.Status), TransTick())
 				}
 			}
 		case "up", "k":
@@ -167,7 +167,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "esc":
 			if m.Phase == types.PhaseSessions {
-				if m.StreamID != "" {
+				if m.SessionID != "" {
 					m.Phase = types.PhaseLive
 				} else {
 					m.Phase = types.PhaseMenu
@@ -181,7 +181,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.Phase = types.PhaseStopping
 				m.TransFrame = 0
 				m.TransDone = false
-				return m, tea.Batch(m.Spinner.Tick, stream.StopStream(m.TtydPID, m.TmuxSession, m.StreamID, m.PromptSharing, m.Panes, m.ResumeMode), TransTick())
+				return m, tea.Batch(m.Spinner.Tick, stream.StopStream(m.TtydPID, m.TmuxSession, m.SessionID, m.PromptSharing, m.Panes, m.ResumeMode), TransTick())
 			}
 		case "w":
 			if m.Phase == types.PhaseLive {
@@ -240,7 +240,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Status.Phase = "stopping" // tell the stop hook stop_broadcast was already called
 			m.TransFrame = 0
 			m.TransDone = false
-			return m, tea.Batch(m.Spinner.Tick, stream.StopStream(m.TtydPID, m.TmuxSession, m.StreamID, m.PromptSharing, m.Panes, m.ResumeMode, msg.Message, msg.Conclusion, msg.GitCommit, msg.GitBranch, msg.GitPushError), TransTick())
+			return m, tea.Batch(m.Spinner.Tick, stream.StopStream(m.TtydPID, m.TmuxSession, m.SessionID, m.PromptSharing, m.Panes, m.ResumeMode, msg.Message, msg.Conclusion, msg.GitCommit, msg.GitBranch, msg.GitPushError), TransTick())
 		}
 		// If waiting/menu, just quit
 		return m, tea.Quit
@@ -251,7 +251,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case types.PaneSpawnedMsg:
 		m.Panes = append(m.Panes, msg.Pane)
-		if sf, err := session.ReadSessionFile(filepath.Join(session.SessionsDir(), m.StreamID+".json")); err == nil {
+		if sf, err := session.ReadSessionFile(filepath.Join(session.SessionsDir(), m.SessionID+".json")); err == nil {
 			sf.Panes = append(sf.Panes, types.SessionFilePaneEntry{
 				PaneID:          msg.Pane.PaneId,
 				ClaudeSessionID: msg.Pane.ClaudeSessionID,
@@ -273,7 +273,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ActivePaneIdx >= len(m.Panes) {
 			m.ActivePaneIdx = max(0, len(m.Panes)-1)
 		}
-		if sf, err := session.ReadSessionFile(filepath.Join(session.SessionsDir(), m.StreamID+".json")); err == nil {
+		if sf, err := session.ReadSessionFile(filepath.Join(session.SessionsDir(), m.SessionID+".json")); err == nil {
 			var newPanes []types.SessionFilePaneEntry
 			for _, pe := range sf.Panes {
 				if pe.PaneID != msg.PaneId {
@@ -287,7 +287,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case types.ImageQueuedMsg:
 		if m.AutoApproveImages {
-			go stream.ApproveImage(m.StreamID, msg.Img.ImageID, true)
+			go stream.ApproveImage(m.SessionID, msg.Img.ImageID, true)
 			return m, nil
 		}
 		m.PendingImages = append(m.PendingImages, msg.Img)
@@ -305,14 +305,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case types.StreamStartedMsg:
 		m.Phase = types.PhaseLive
-		m.StreamID = msg.StreamID
+		m.SessionID = msg.SessionID
+		m.BroadcastID = msg.BroadcastID
 		m.StreamURL = msg.URL
 		m.PinCode = msg.PinCode
 		m.TtydPID = msg.PID
 		m.TtydPort = msg.TtydPort
-		m.TmuxSession = "vibecast-" + msg.StreamID
+		m.TmuxSession = "vibecast-" + msg.SessionID
 		exec.Command("tmux", "set-option", "-t", m.TmuxSession, "status-left",
-			fmt.Sprintf(" 🔴 AGENTIC LIVE  /lives/%s ", msg.StreamID)).Run()
+			fmt.Sprintf(" 🔴 AGENTIC LIVE  /live/%s ", msg.BroadcastID)).Run()
 		m.MetaCh = msg.MetaCh
 		m.ClaudeSessionID = msg.ClaudeSessionID
 		m.StartTime = time.Now()
@@ -324,7 +325,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.Status != nil {
 			m.Status.Mu.Lock()
-			m.Status.StreamID = msg.StreamID
+			m.Status.SessionID = msg.SessionID
+			m.Status.BroadcastID = msg.BroadcastID
 			m.Status.URL = msg.URL
 			m.Status.Phase = "live"
 			m.Status.ClaudeSessionID = msg.ClaudeSessionID
@@ -340,7 +342,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}()
 		// Broadcast phase change to fkeybar instances
 		if m.Status != nil {
-			m.Status.BroadcastEvent(fmt.Sprintf(`{"type":"phase","phase":"live","streamId":"%s"}`, msg.StreamID))
+			m.Status.BroadcastEvent(fmt.Sprintf(`{"type":"phase","phase":"live","sessionId":"%s"}`, msg.SessionID))
 		}
 		return m, tea.Batch(UptimeTick(), TransTick())
 
@@ -404,7 +406,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Status.Mu.Unlock()
 			m.Status.BroadcastEvent(`{"type":"phase","phase":"starting"}`)
 		}
-		return m, tea.Batch(m.Spinner.Tick, stream.StartStream(msg.PromptSharing, msg.ShareProjectInfo, m.ProjectName, m.ResumeStreamID, m.ClaudeResumeID, m.Status), TransTick())
+		return m, tea.Batch(m.Spinner.Tick, stream.StartStream(msg.PromptSharing, msg.ShareProjectInfo, m.ProjectName, m.ResumeSessionID, m.BroadcastID, m.ClaudeResumeID, m.Status), TransTick())
 
 	case types.FKeyActionMsg:
 		// F-key actions forwarded from control socket
@@ -413,12 +415,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.Key {
 			case "f2": // New pane
 				sessionName := m.TmuxSession
-				streamID := m.StreamID
+				sessionID := m.SessionID
 				paneIdx := len(m.Panes) + 1
 				paneId := fmt.Sprintf("pane%d", paneIdx)
 				paneName := fmt.Sprintf("Pane %d", paneIdx)
 				return m, func() tea.Msg {
-					pane, err := stream.SpawnPane(sessionName, streamID, paneId, paneName, m.Status, "")
+					pane, err := stream.SpawnPane(sessionName, sessionID, paneId, paneName, m.Status, "")
 					if err != nil {
 						return types.PaneClosedMsg{PaneId: paneId, Err: err}
 					}

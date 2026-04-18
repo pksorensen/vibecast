@@ -20,7 +20,8 @@ type Model struct {
 	TransFrame   int
 	TransDone    bool
 	Spinner      spinner.Model
-	StreamID     string
+	SessionID    string
+	BroadcastID  string
 	StreamURL    string
 	PinCode      string
 	ViewerCount  int
@@ -41,9 +42,9 @@ type Model struct {
 	ShareProjectInfo bool
 	ProjectName      string
 	// Resume
-	ResumeStreamID string
-	ResumeMode     bool
-	ClaudeResumeID string // prior session ID to pass to claude --resume (set from VIBECAST_RESUME_SESSION_ID)
+	ResumeSessionID string
+	ResumeMode      bool
+	ClaudeResumeID  string // prior session ID to pass to claude --resume (set from VIBECAST_RESUME_SESSION_ID)
 	// Claude session
 	ClaudeSessionID string
 	// Metadata channel

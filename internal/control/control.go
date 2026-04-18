@@ -73,7 +73,8 @@ func StartControlServer(status *types.SharedStatus, program *tea.Program, restar
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		status.Mu.Lock()
 		data, _ := json.Marshal(map[string]interface{}{
-			"streamId":      status.StreamID,
+			"sessionId":     status.SessionID,
+			"broadcastId":   status.BroadcastID,
 			"url":           status.URL,
 			"pinCode":       status.PinCode,
 			"viewers":       status.Viewers,
@@ -134,13 +135,17 @@ func StartControlServer(status *types.SharedStatus, program *tea.Program, restar
 
 		status.Mu.Lock()
 		status.ServerHost = newHost
-		newURL := util.BuildViewerURL(newHost, status.StreamID)
+		broadcastID := status.BroadcastID
+		if broadcastID == "" {
+			broadcastID = status.SessionID
+		}
+		newURL := util.BuildViewerURL(newHost, broadcastID)
 		status.URL = newURL
 		connToClose := status.ServerConn
-		streamID := status.StreamID
+		sessionID := status.SessionID
 		status.Mu.Unlock()
 
-		sfPath := filepath.Join(session.SessionsDir(), streamID+".json")
+		sfPath := filepath.Join(session.SessionsDir(), sessionID+".json")
 		if sf, err := session.ReadSessionFile(sfPath); err == nil {
 			sf.ServerHost = newHost
 			session.WriteSessionFile(*sf)
@@ -276,12 +281,13 @@ func StartControlServer(status *types.SharedStatus, program *tea.Program, restar
 		// Send initial state
 		status.Mu.Lock()
 		initData, _ := json.Marshal(map[string]interface{}{
-			"type":     "init",
-			"streamId": status.StreamID,
-			"phase":    status.Phase,
-			"viewers":  status.Viewers,
-			"uptime":   status.Uptime,
-			"panes":    status.Panes,
+			"type":        "init",
+			"sessionId":   status.SessionID,
+			"broadcastId": status.BroadcastID,
+			"phase":       status.Phase,
+			"viewers":     status.Viewers,
+			"uptime":      status.Uptime,
+			"panes":       status.Panes,
 		})
 		status.Mu.Unlock()
 		fmt.Fprintf(w, "data: %s\n\n", initData)

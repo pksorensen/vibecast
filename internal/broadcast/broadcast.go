@@ -41,7 +41,7 @@ func classifyURL(u string) string {
 	}
 }
 
-func postURLDetected(serverHost, streamID, u, context string) {
+func postURLDetected(serverHost, sessionID, u, context string) {
 	scheme := "https"
 	if util.IsLocalHost(serverHost) {
 		scheme = "http"
@@ -50,7 +50,7 @@ func postURLDetected(serverHost, streamID, u, context string) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"type":      "metadata",
 		"subtype":   "url_detected",
-		"streamId":  streamID,
+		"sessionId": sessionID,
 		"url":       u,
 		"context":   context,
 		"timestamp": time.Now().UnixMilli(),
@@ -73,19 +73,23 @@ func logDebug(format string, args ...interface{}) {
 }
 
 // ConnectBroadcast connects local ttyd to the cloud server and retries on disconnection.
-func ConnectBroadcast(streamID string, status *types.SharedStatus, metaCh chan []byte, ttydPort int, paneId string) {
+func ConnectBroadcast(sessionID string, status *types.SharedStatus, metaCh chan []byte, ttydPort int, paneId string) {
 	for attempt := 0; attempt < 120; attempt++ {
 		if attempt > 0 {
 			time.Sleep(2 * time.Second)
 		}
 		status.Mu.Lock()
 		host := status.ServerHost
+		broadcastID := status.BroadcastID
 		status.Mu.Unlock()
-		connectBroadcastOnce(streamID, host, status, metaCh, ttydPort, attempt, paneId)
+		if broadcastID == "" {
+			broadcastID = sessionID
+		}
+		connectBroadcastOnce(sessionID, broadcastID, host, status, metaCh, ttydPort, attempt, paneId)
 	}
 }
 
-func connectBroadcastOnce(streamID string, serverHost string, status *types.SharedStatus, metaCh chan []byte, ttydPort int, attempt int, paneId string) {
+func connectBroadcastOnce(sessionID string, broadcastID string, serverHost string, status *types.SharedStatus, metaCh chan []byte, ttydPort int, attempt int, paneId string) {
 	// 1. Connect to local ttyd
 	ttydHost := fmt.Sprintf("localhost:%d", ttydPort)
 	ttydConn, ttydReader, err := ws.ConnectWithProtocol(ttydHost, "/ws", "tty")
@@ -127,7 +131,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 	ws.SendText(ttydConn, initMsg)
 
 	// 3. Connect to cloud server broadcast endpoint
-	broadcastPath := "/api/lives/broadcast/ws?streamId=" + streamID + "&paneId=" + paneId
+	broadcastPath := "/api/lives/broadcast/ws?sessionId=" + sessionID + "&broadcastId=" + broadcastID + "&paneId=" + paneId
 	if token, _, err := auth.GetValidToken(); err == nil && token != "" {
 		broadcastPath += "&token=" + token
 	}
@@ -150,7 +154,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 		status.Mu.Unlock()
 	}()
 
-	logDebug("[broadcast] relay active for stream %s\n", streamID)
+	logDebug("[broadcast] relay active for session %s\n", sessionID)
 
 	done := make(chan struct{})
 
@@ -173,7 +177,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 
 	// Goroutine: poll broadcaster's terminal size and propagate to tmux -> viewers
 	go func() {
-		tmuxSess := "vibecast-" + streamID
+		tmuxSess := "vibecast-" + sessionID
 		tmuxTarget := tmuxSess + ":" + paneId
 		lastCols, lastRows := 0, 0
 		lastTermCols, lastTermRows := 0, 0
@@ -242,7 +246,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 
 	// savePaneCapture writes a timestamped plain-text capture file and prunes to 10 files.
 	savePaneCapture := func(plain string) {
-		name := fmt.Sprintf("%d-%s.txt", time.Now().UnixNano(), streamID)
+		name := fmt.Sprintf("%d-%s.txt", time.Now().UnixNano(), sessionID)
 		path := filepath.Join(captureDebugDir, name)
 		os.WriteFile(path, []byte(plain), 0644)
 
@@ -268,7 +272,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 	}
 
 	go func() {
-		snapTmuxTarget := "vibecast-" + streamID + ":" + paneId
+		snapTmuxTarget := "vibecast-" + sessionID + ":" + paneId
 		snapshotURL := fmt.Sprintf("%s://%s/_relay/snapshot", snapSchemeBase, serverHost)
 
 		postSnapshot := func() {
@@ -288,7 +292,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 						"vibecast.trust_prompt",
 					)
 					span.SetAttributes(
-						attribute.String("stream.id", streamID),
+						attribute.String("session.id", sessionID),
 						attribute.String("allowed_dir", allowedDir),
 					)
 					if allowedDir != "" && strings.Contains(rendered, allowedDir) {
@@ -331,7 +335,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 					if match == "" {
 						match = "Session too large"
 					}
-					idSource := fmt.Sprintf("session-size:%s:%s", streamID, match)
+					idSource := fmt.Sprintf("session-size:%s:%s", sessionID, match)
 					hash := sha256.Sum256([]byte(idSource))
 					paneQuestionId := fmt.Sprintf("alp-pane-%x", hash[:8])
 
@@ -339,7 +343,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 					options := []string{"Resume from summary", "Resume full session as-is"}
 
 					payload, _ := json.Marshal(map[string]interface{}{
-						"streamId":       streamID,
+						"sessionId":      sessionID,
 						"type":           "metadata",
 						"subtype":        "alp_pane",
 						"paneQuestionId": paneQuestionId,
@@ -360,8 +364,8 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 			}
 
 			body, _ := json.Marshal(map[string]string{
-				"streamId": streamID,
-				"snapshot": rendered,
+				"sessionId": sessionID,
+				"snapshot":  rendered,
 			})
 			resp, err := http.Post(snapshotURL, "application/json", bytes.NewReader(body))
 			if err != nil {
@@ -406,10 +410,10 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 				Options      []string `json:"options"`
 				Answer       *string  `json:"answer"`
 			}
-			injectionTarget := "vibecast-" + streamID + ":" + paneId + ".0"
+			injectionTarget := "vibecast-" + sessionID + ":" + paneId + ".0"
 			lastInjectedQuestionID := ""
 			pollURL := fmt.Sprintf("%s://%s/api/lives/sessions/%s/pending-answer",
-				snapSchemeBase, serverHost, streamID)
+				snapSchemeBase, serverHost, sessionID)
 			ticker := time.NewTicker(3 * time.Second)
 			defer ticker.Stop()
 			for {
@@ -419,7 +423,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 				case <-ticker.C:
 					_, pollSpan := telemetry.Tracer().Start(context.Background(), "vibecast.answer.poll",
 						trace.WithAttributes(
-							attribute.String("stream.id", streamID),
+							attribute.String("session.id", sessionID),
 							attribute.String("poll.url", pollURL),
 						))
 					resp, err := http.Get(pollURL)
@@ -458,7 +462,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 
 					_, injectSpan := telemetry.Tracer().Start(context.Background(), "vibecast.answer.inject",
 						trace.WithAttributes(
-							attribute.String("stream.id", streamID),
+							attribute.String("session.id", sessionID),
 							attribute.String("question.id", qID),
 							attribute.String("question.type", r.QuestionType),
 							attribute.String("answer.preview", func() string {
@@ -600,7 +604,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 						if !seenURLs[u] {
 							seenURLs[u] = true
 							ctx := classifyURL(u)
-							go postURLDetected(serverHost, streamID, u, ctx)
+							go postURLDetected(serverHost, sessionID, u, ctx)
 						}
 					}
 					// In job mode, auto-answer Claude Code's workspace trust dialog.
@@ -610,7 +614,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 					// debounced to at most once per 500ms to avoid excess subprocess calls.
 					if jobMode && !trustAnswered && time.Since(lastCaptureCheck) > 500*time.Millisecond {
 						lastCaptureCheck = time.Now()
-						target := fmt.Sprintf("vibecast-%s:%s.0", streamID, paneId)
+						target := fmt.Sprintf("vibecast-%s:%s.0", sessionID, paneId)
 						rendered, captureErr := tmuxCmd("capture-pane", "-p", "-t", target).Output()
 						if captureErr == nil {
 							renderedStr := string(rendered)
@@ -621,7 +625,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 									"vibecast.trust_prompt",
 								)
 								span.SetAttributes(
-									attribute.String("stream.id", streamID),
+									attribute.String("session.id", sessionID),
 									attribute.String("allowed_dir", allowedDir),
 								)
 								if allowedDir != "" && strings.Contains(renderedStr, allowedDir) {
@@ -651,7 +655,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 		h := sha256.Sum256([]byte(pin))
 		kbPinHash = fmt.Sprintf("%x", h)
 	}
-	tmuxSessName := "vibecast-" + streamID
+	tmuxSessName := "vibecast-" + sessionID
 
 	go func() {
 		for {
@@ -680,7 +684,7 @@ func connectBroadcastOnce(streamID string, serverHost string, status *types.Shar
 	}()
 
 	<-done
-	logDebug("[broadcast] relay disconnected for stream %s\n", streamID)
+	logDebug("[broadcast] relay disconnected for session %s\n", sessionID)
 }
 
 // handleKeyboardInput processes keyboard input messages from viewers.
@@ -736,7 +740,7 @@ func handleKeyboardInput(payload []byte, expectedPinHash, tmuxSession, paneId st
 }
 
 // ConnectChat connects to the chat WebSocket and sends received messages to the TUI program.
-func ConnectChat(streamID string, program *tea.Program) {
+func ConnectChat(sessionID string, program *tea.Program) {
 	serverHost := func() string {
 		if h := os.Getenv("AGENTICS_SERVER"); h != "" {
 			return h
@@ -753,9 +757,9 @@ func ConnectChat(streamID string, program *tea.Program) {
 	}
 
 	joinMsg, _ := json.Marshal(types.ChatMsg{
-		Type:     "join",
-		StreamID: streamID,
-		Username: "Broadcaster",
+		Type:      "join",
+		SessionID: sessionID,
+		Username:  "Broadcaster",
 	})
 	ws.SendText(conn, joinMsg)
 

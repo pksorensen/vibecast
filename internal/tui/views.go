@@ -204,7 +204,7 @@ func (m Model) viewSessions() string {
 	if !m.TransDone {
 		lines = styles.CenterBurst(lines, m.TransFrame, styles.TransMaxFrames)
 	}
-	return styles.RenderCRT(lines, m.StreamID != "")
+	return styles.RenderCRT(lines, m.SessionID != "")
 }
 
 func (m Model) viewStarting() string {
@@ -284,7 +284,7 @@ func (m Model) viewLive() string {
 		"  LIVE            AGENTICS BROADCAST SYSTEM",
 		"  ─────────────────────────────────────────────────────────",
 		"",
-		fmt.Sprintf("   Stream:  %-8s    Viewers: %d", m.StreamID, m.ViewerCount),
+		fmt.Sprintf("   Session: %-8s    Viewers: %d", m.SessionID, m.ViewerCount),
 		fmt.Sprintf("   Uptime:  %s", upStr),
 		"",
 	}

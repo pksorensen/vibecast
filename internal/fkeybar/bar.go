@@ -37,15 +37,15 @@ type sessionEntry struct {
 type InfoModel struct {
 	Width    int
 	Height   int
-	StreamID string
 
 	// State from control socket polling
-	Phase   string
-	Viewers int
-	Uptime  string
-	URL     string
-	PinCode string
-	Panes   []types.PaneStatus
+	Phase     string
+	SessionID string
+	Viewers   int
+	Uptime    string
+	URL       string
+	PinCode   string
+	Panes     []types.PaneStatus
 
 	// Menu state (pre-stream)
 	MenuIndex int
@@ -67,9 +67,9 @@ type InfoModel struct {
 }
 
 // NewInfoModel creates the full-screen info model.
-func NewInfoModel(streamID string) InfoModel {
+func NewInfoModel(sessionID string) InfoModel {
 	return InfoModel{
-		StreamID:         streamID,
+		SessionID:        sessionID,
 		Phase:            "menu",
 		menuItems:        []string{"Start Streaming", "Resume Session", "Settings", "Quit"},
 		PromptSharing:    true,
@@ -113,8 +113,8 @@ func (m InfoModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Phase = msg.Status.Phase
 			m.Viewers = msg.Status.Viewers
 			m.Uptime = msg.Status.Uptime
-			if msg.Status.StreamID != "" {
-				m.StreamID = msg.Status.StreamID
+			if msg.Status.SessionID != "" {
+				m.SessionID = msg.Status.SessionID
 			}
 			if msg.Status.URL != "" {
 				m.URL = msg.Status.URL
@@ -353,7 +353,7 @@ func (m InfoModel) viewLive() string {
 		" " + liveStyle.Render("● LIVE") + "  " + titleStyle.Render("AGENTICS BROADCAST SYSTEM"),
 		" " + dimStyle.Render("─────────────────────────────────────────"),
 		"",
-		fmt.Sprintf("  Stream:  %-12s  Viewers: %d", m.StreamID, m.Viewers),
+		fmt.Sprintf("  Session: %-12s  Viewers: %d", m.SessionID, m.Viewers),
 		fmt.Sprintf("  Uptime:  %s", m.Uptime),
 		"",
 	}
@@ -568,7 +568,7 @@ type BarModel struct {
 }
 
 // NewBarModel creates a 2-line workspace fkeybar.
-func NewBarModel(streamID string) BarModel {
+func NewBarModel(sessionID string) BarModel {
 	return BarModel{
 		client: NewClient(),
 		VSCode: os.Getenv("TERM_PROGRAM") == "vscode",

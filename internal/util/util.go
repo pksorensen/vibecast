@@ -22,8 +22,8 @@ func FindFreePort() (int, error) {
 	return port, nil
 }
 
-// GenerateStreamID generates a random 8-character stream identifier.
-func GenerateStreamID() string {
+// GenerateSessionID generates a random 8-character session identifier.
+func GenerateSessionID() string {
 	chars := "abcdefghijklmnopqrstuvwxyz0123456789"
 	result := make([]byte, 8)
 	for i := range result {
@@ -70,13 +70,13 @@ func IsLocalHost(host string) bool {
 	return strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1")
 }
 
-// BuildViewerURL constructs the viewer URL for a given server host and stream ID.
-func BuildViewerURL(serverHost, streamID string) string {
+// BuildViewerURL constructs the viewer URL for a given server host and broadcast ID.
+func BuildViewerURL(serverHost, broadcastID string) string {
 	if IsLocalHost(serverHost) {
-		return fmt.Sprintf("http://%s/lives/%s", serverHost, streamID)
+		return fmt.Sprintf("http://%s/live/%s", serverHost, broadcastID)
 	}
 	host := strings.Split(serverHost, ":")[0]
-	return fmt.Sprintf("https://%s/lives/%s", host, streamID)
+	return fmt.Sprintf("https://%s/live/%s", host, broadcastID)
 }
 
 // GetProjectName returns the project name (without owner prefix).
@@ -110,8 +110,8 @@ func GetProjectOwner() string {
 	return "default"
 }
 
-// ExtractStreamID takes a URL or bare stream ID and returns the stream ID portion.
-func ExtractStreamID(input string) string {
+// ExtractSessionID takes a URL or bare session ID and returns the session ID portion.
+func ExtractSessionID(input string) string {
 	input = strings.TrimSpace(input)
 	if strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://") {
 		parts := strings.Split(strings.TrimRight(input, "/"), "/")

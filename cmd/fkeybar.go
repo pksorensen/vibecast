@@ -19,15 +19,15 @@ func RunFKeyBar() {
 		}
 	}()
 
-	var streamID string
+	var sessionID string
 	var infoMode bool
 	var helpMode bool
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
-		case "--stream-id":
+		case "--session-id":
 			if i+1 < len(os.Args) {
-				streamID = os.Args[i+1]
+				sessionID = os.Args[i+1]
 				i++
 			}
 		case "--info":
@@ -44,9 +44,9 @@ func RunFKeyBar() {
 	if helpMode {
 		model = fkeybar.NewHelpModel()
 	} else if infoMode {
-		model = fkeybar.NewInfoModel(streamID)
+		model = fkeybar.NewInfoModel(sessionID)
 	} else {
-		model = fkeybar.NewBarModel(streamID)
+		model = fkeybar.NewBarModel(sessionID)
 	}
 
 	p := tea.NewProgram(model)

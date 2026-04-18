@@ -21,16 +21,16 @@ const chunkSize = 200
 
 // RunSync handles the "vibecast sync" subcommand.
 func RunSync() {
-	var streamID string
+	var sessionID string
 	var syncAll bool
 	var filePath string
 
 	args := os.Args[2:]
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--stream-id":
+		case "--session-id":
 			if i+1 < len(args) {
-				streamID = args[i+1]
+				sessionID = args[i+1]
 				i++
 			}
 		case "--all":
@@ -42,10 +42,10 @@ func RunSync() {
 		}
 	}
 
-	if streamID == "" {
-		fmt.Fprintf(os.Stderr, "Error: --stream-id is required\n")
-		fmt.Fprintf(os.Stderr, "Usage: vibecast sync --stream-id <id> [session.jsonl]\n")
-		fmt.Fprintf(os.Stderr, "       vibecast sync --stream-id <id> --all\n")
+	if sessionID == "" {
+		fmt.Fprintf(os.Stderr, "Error: --session-id is required\n")
+		fmt.Fprintf(os.Stderr, "Usage: vibecast sync --session-id <id> [session.jsonl]\n")
+		fmt.Fprintf(os.Stderr, "       vibecast sync --session-id <id> --all\n")
 		os.Exit(1)
 	}
 
@@ -61,7 +61,7 @@ func RunSync() {
 
 	if filePath != "" {
 		// Sync a specific file
-		syncFile(filePath, streamID, serverHost, token)
+		syncFile(filePath, sessionID, serverHost, token)
 	} else if syncAll {
 		// Sync all sessions for current project
 		sessions := session.ScanClaudeSessions()
@@ -77,7 +77,7 @@ func RunSync() {
 				continue
 			}
 			fmt.Printf("[%d/%d] Syncing session %s (%s)\n", i+1, len(sessions), s.SessionID[:8], s.FirstPrompt)
-			syncFile(path, streamID, serverHost, token)
+			syncFile(path, sessionID, serverHost, token)
 		}
 	} else {
 		// Auto-discover most recent session
@@ -98,7 +98,7 @@ func RunSync() {
 			fmt.Printf("  First prompt: %s\n", s.FirstPrompt)
 		}
 		fmt.Printf("  Messages: %d\n", s.MessageCount)
-		syncFile(path, streamID, serverHost, token)
+		syncFile(path, sessionID, serverHost, token)
 	}
 }
 
@@ -132,7 +132,7 @@ func execGitCommand(args ...string) (string, error) {
 	return string(out), err
 }
 
-func syncFile(filePath, streamID, serverHost, token string) {
+func syncFile(filePath, sessionID, serverHost, token string) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: could not open %s: %v\n", filePath, err)
@@ -180,8 +180,8 @@ func syncFile(filePath, streamID, serverHost, token string) {
 		chunk := allLines[i:end]
 
 		payload := map[string]interface{}{
-			"streamId": streamID,
-			"lines":    chunk,
+			"sessionId": sessionID,
+			"lines":     chunk,
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {

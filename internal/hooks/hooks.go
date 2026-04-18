@@ -102,7 +102,7 @@ func hookReadStdinAndFindSession() (json.RawMessage, *types.SessionFile, string,
 		os.Exit(0)
 	}
 
-	util.DebugLog("hookReadStdin: found session streamId=%s, claudeSessionId=%s", sf.StreamID, base.SessionID)
+	util.DebugLog("hookReadStdin: found session sessionId=%s, claudeSessionId=%s", sf.SessionID, base.SessionID)
 	return json.RawMessage(stdinData), sf, cwd, base.TranscriptPath, base.SessionID
 }
 
@@ -268,7 +268,7 @@ func extractUsageFromTranscript(lines []map[string]interface{}) map[string]inter
 func HookPostMetadata(sf *types.SessionFile, payload []byte) {
 	_, span := telemetry.Tracer().Start(context.Background(), "vibecast.hook.metadata_post",
 		trace.WithAttributes(
-			attribute.String("stream.id", sf.StreamID),
+			attribute.String("session.id", sf.SessionID),
 			attribute.String("server.host", sf.ServerHost),
 		))
 	defer span.End()
@@ -322,14 +322,14 @@ func handleHookPrompt() {
 	}
 
 	p := map[string]interface{}{
-		"streamId":  sf.StreamID,
+		"sessionId": sf.SessionID,
 		"type":      "metadata",
 		"subtype":   "prompt",
 		"prompt":    hookInput.Prompt,
 		"timestamp": time.Now().Unix(),
 	}
 
-	if tl := readTranscriptIncrement(sf.StreamID, transcriptPath); len(tl) > 0 {
+	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 		if usage := extractUsageFromTranscript(tl); usage != nil {
 			p["usage"] = usage
@@ -354,7 +354,7 @@ func handleHookSession() {
 	}
 
 	p := map[string]interface{}{
-		"streamId":        sf.StreamID,
+		"sessionId":       sf.SessionID,
 		"type":            "metadata",
 		"subtype":         "session_start",
 		"source":          hookInput.Source,
@@ -366,14 +366,18 @@ func handleHookSession() {
 		p["sessionSummary"] = summary
 	}
 
-	if tl := readTranscriptIncrement(sf.StreamID, transcriptPath); len(tl) > 0 {
+	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 	}
 
 	payload, _ := json.Marshal(p)
 	HookPostMetadata(sf, payload)
 
-	viewerURL := util.BuildViewerURL(sf.ServerHost, sf.StreamID)
+	broadcastID := sf.BroadcastID
+	if broadcastID == "" {
+		broadcastID = sf.SessionID
+	}
+	viewerURL := util.BuildViewerURL(sf.ServerHost, broadcastID)
 	output, _ := json.Marshal(map[string]interface{}{
 		"additionalContext": fmt.Sprintf("This session is being broadcasted online at %s. Avoid showing sensitive secrets, API keys, or passwords in your output.", viewerURL),
 	})
@@ -447,7 +451,7 @@ func handleHookTool() {
 		}
 		if planInput.Plan != "" {
 			planPayload, _ := json.Marshal(map[string]interface{}{
-				"streamId":     sf.StreamID,
+				"sessionId":    sf.SessionID,
 				"type":         "metadata",
 				"subtype":      "plan",
 				"planMarkdown": planInput.Plan,
@@ -463,7 +467,7 @@ func handleHookTool() {
 	}
 
 	p := map[string]interface{}{
-		"streamId":        sf.StreamID,
+		"sessionId":       sf.SessionID,
 		"type":            "metadata",
 		"subtype":         "tool_use",
 		"toolName":        hookInput.ToolName,
@@ -474,7 +478,7 @@ func handleHookTool() {
 		"timestamp":       time.Now().Unix(),
 	}
 
-	if tl := readTranscriptIncrement(sf.StreamID, transcriptPath); len(tl) > 0 {
+	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 	}
 
@@ -486,7 +490,7 @@ func handleHookTool() {
 func handleHookPostTool() {
 	util.DebugLog("[post-tool] checkpoint A: entry")
 	stdinData, sf, _, transcriptPath, claudeSessionId := hookReadStdinAndFindSession()
-	util.DebugLog("[post-tool] checkpoint B: stdin read, %d bytes, streamId=%s", len(stdinData), sf.StreamID)
+	util.DebugLog("[post-tool] checkpoint B: stdin read, %d bytes, sessionId=%s", len(stdinData), sf.SessionID)
 
 	var hookInput struct {
 		ToolName     string          `json:"tool_name"`
@@ -518,11 +522,11 @@ func handleHookPostTool() {
 		json.Unmarshal(hookInput.ToolInput, &toolInput)
 	}
 
-	transcriptLines := readTranscriptIncrement(sf.StreamID, transcriptPath)
+	transcriptLines := readTranscriptIncrement(sf.SessionID, transcriptPath)
 	usage := extractUsageFromTranscript(transcriptLines)
 
 	p := map[string]interface{}{
-		"streamId":        sf.StreamID,
+		"sessionId":       sf.SessionID,
 		"type":            "metadata",
 		"subtype":         "tool_use_end",
 		"toolName":        hookInput.ToolName,
@@ -562,7 +566,7 @@ func handleHookSubagentStart() {
 	}
 
 	p := map[string]interface{}{
-		"streamId":       sf.StreamID,
+		"sessionId":      sf.SessionID,
 		"type":           "metadata",
 		"subtype":        "subagent_start",
 		"agentId":        hookInput.AgentID,
@@ -571,7 +575,7 @@ func handleHookSubagentStart() {
 		"timestamp":      time.Now().Unix(),
 	}
 
-	if tl := readTranscriptIncrement(sf.StreamID, transcriptPath); len(tl) > 0 {
+	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 	}
 
@@ -593,12 +597,12 @@ func handleHookSubagentStop() {
 		os.Exit(0)
 	}
 
-	transcriptLines := readTranscriptIncrement(sf.StreamID, transcriptPath)
-	agentTranscriptLines := readTranscriptIncrement(sf.StreamID, hookInput.AgentTranscriptPath)
+	transcriptLines := readTranscriptIncrement(sf.SessionID, transcriptPath)
+	agentTranscriptLines := readTranscriptIncrement(sf.SessionID, hookInput.AgentTranscriptPath)
 	agentPrompt := readFirstUserPrompt(hookInput.AgentTranscriptPath)
 
 	p := map[string]interface{}{
-		"streamId":            sf.StreamID,
+		"sessionId":           sf.SessionID,
 		"type":                "metadata",
 		"subtype":             "subagent_stop",
 		"agentId":             hookInput.AgentID,
@@ -640,7 +644,7 @@ func handleHookTaskCreated() {
 	}
 
 	p := map[string]interface{}{
-		"streamId":        sf.StreamID,
+		"sessionId":       sf.SessionID,
 		"type":            "metadata",
 		"subtype":         "task_created",
 		"taskId":          hookInput.TaskID,
@@ -670,7 +674,7 @@ func handleHookTaskCompleted() {
 	}
 
 	p := map[string]interface{}{
-		"streamId":     sf.StreamID,
+		"sessionId":    sf.SessionID,
 		"type":         "metadata",
 		"subtype":      "task_completed",
 		"taskId":       hookInput.TaskID,
@@ -688,14 +692,14 @@ func handleHookTaskCompleted() {
 func handleHookStop() {
 	_, sf, cwd, transcriptPath, _ := hookReadStdinAndFindSession()
 
-	transcriptLines := readTranscriptIncrement(sf.StreamID, transcriptPath)
+	transcriptLines := readTranscriptIncrement(sf.SessionID, transcriptPath)
 
 	text := extractAssistantText(transcriptLines)
 	usage := extractUsageFromTranscript(transcriptLines)
 
 	if text != "" || usage != nil {
 		p := map[string]interface{}{
-			"streamId":  sf.StreamID,
+			"sessionId": sf.SessionID,
 			"type":      "metadata",
 			"subtype":   "assistant_response",
 			"timestamp": time.Now().Unix(),
@@ -764,9 +768,9 @@ func handleHookStop() {
 			}
 			if json.Unmarshal([]byte(statusBody), &statusResp) == nil && statusResp.Phase == "live" {
 				// stop_broadcast has not been called yet
-				count := readStopBlockCount(sf.StreamID)
+				count := readStopBlockCount(sf.SessionID)
 				if count < 2 {
-					writeStopBlockCount(sf.StreamID, count+1)
+					writeStopBlockCount(sf.SessionID, count+1)
 					reason := "Before finishing, you must call the stop_broadcast MCP tool to finalize the session.\n\n" +
 						"This tool records what was accomplished and triggers proper session cleanup.\n\n" +
 						"Tool: stop_broadcast\n" +
@@ -824,7 +828,7 @@ func handleHookPermissionRequest() {
 		}
 	}
 
-	util.DebugLog("[permission-request] toolName=%s toolUseId=%s streamId=%s question=%s", hookInput.ToolName, hookInput.ToolUseID, sf.StreamID, question)
+	util.DebugLog("[permission-request] toolName=%s toolUseId=%s sessionId=%s question=%s", hookInput.ToolName, hookInput.ToolUseID, sf.SessionID, question)
 
 	// Answering AskUserQuestion / AskFollowupQuestion is the implicit approval — there is
 	// nothing for the team to vote on. Skip posting to avoid cluttering the chat.
@@ -842,7 +846,7 @@ func handleHookPermissionRequest() {
 	syntheticId := hookInput.ToolUseID == ""
 	toolUseId := hookInput.ToolUseID
 	if toolUseId == "" {
-		toolUseId = fmt.Sprintf("perm-%s-%d", sf.StreamID, time.Now().UnixMilli())
+		toolUseId = fmt.Sprintf("perm-%s-%d", sf.SessionID, time.Now().UnixMilli())
 	}
 
 	// Root span for the entire permission lifecycle — visible in Aspire traces.
@@ -851,7 +855,7 @@ func handleHookPermissionRequest() {
 		telemetry.ContextFromTraceparent(os.Getenv("TRACEPARENT")),
 		"vibecast.permission_request",
 		trace.WithAttributes(
-			attribute.String("stream.id", sf.StreamID),
+			attribute.String("session.id", sf.SessionID),
 			attribute.String("tool.name", hookInput.ToolName),
 			attribute.String("tool.use_id", toolUseId),
 			attribute.String("question", question),
@@ -861,7 +865,7 @@ func handleHookPermissionRequest() {
 	defer span.End()
 
 	p := map[string]interface{}{
-		"streamId":  sf.StreamID,
+		"sessionId": sf.SessionID,
 		"type":      "metadata",
 		"subtype":   "permission_request",
 		"toolName":  hookInput.ToolName,
@@ -886,8 +890,8 @@ func handleHookPermissionRequest() {
 	if util.IsLocalHost(sf.ServerHost) {
 		scheme = "http"
 	}
-	voteURL := fmt.Sprintf("%s://%s/api/lives/question-vote?streamId=%s&toolUseId=%s",
-		scheme, sf.ServerHost, sf.StreamID, toolUseId)
+	voteURL := fmt.Sprintf("%s://%s/api/lives/question-vote?sessionId=%s&toolUseId=%s",
+		scheme, sf.ServerHost, sf.SessionID, toolUseId)
 	util.DebugLog("[permission-request] polling voteURL=%s", voteURL)
 
 	deadline := time.Now().Add(31 * time.Second)
@@ -899,7 +903,7 @@ func handleHookPermissionRequest() {
 
 		_, pollSpan := telemetry.Tracer().Start(context.Background(), "vibecast.permission_request.poll",
 			trace.WithAttributes(
-				attribute.String("stream.id", sf.StreamID),
+				attribute.String("session.id", sf.SessionID),
 				attribute.String("tool.use_id", toolUseId),
 				attribute.Int("poll.attempt", attempt),
 				attribute.Int64("poll.elapsed_ms", elapsedMs),
@@ -1006,7 +1010,7 @@ func handleHookPreCompact() {
 
 	_, span := telemetry.Tracer().Start(context.Background(), "vibecast.compact",
 		trace.WithAttributes(
-			attribute.String("stream.id", sf.StreamID),
+			attribute.String("session.id", sf.SessionID),
 			attribute.String("compact.trigger", hookInput.Trigger),
 		))
 	// Span ends in post-compact — we stash the span context so it can be resumed.
@@ -1014,7 +1018,7 @@ func handleHookPreCompact() {
 	span.End()
 
 	p := map[string]interface{}{
-		"streamId":  sf.StreamID,
+		"sessionId": sf.SessionID,
 		"type":      "metadata",
 		"subtype":   "pre_compact",
 		"trigger":   hookInput.Trigger,
@@ -1023,7 +1027,7 @@ func handleHookPreCompact() {
 	if hookInput.CustomInstructions != "" {
 		p["customInstructions"] = hookInput.CustomInstructions
 	}
-	if tl := readTranscriptIncrement(sf.StreamID, transcriptPath); len(tl) > 0 {
+	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 	}
 
@@ -1042,13 +1046,13 @@ func handleHookPostCompact() {
 
 	_, span := telemetry.Tracer().Start(context.Background(), "vibecast.compact.end",
 		trace.WithAttributes(
-			attribute.String("stream.id", sf.StreamID),
+			attribute.String("session.id", sf.SessionID),
 			attribute.Bool("has_summary", hookInput.Summary != ""),
 		))
 	span.End()
 
 	p := map[string]interface{}{
-		"streamId":  sf.StreamID,
+		"sessionId": sf.SessionID,
 		"type":      "metadata",
 		"subtype":   "post_compact",
 		"timestamp": time.Now().Unix(),
@@ -1061,7 +1065,7 @@ func handleHookPostCompact() {
 		}
 		p["summary"] = summary
 	}
-	if tl := readTranscriptIncrement(sf.StreamID, transcriptPath); len(tl) > 0 {
+	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 	}
 

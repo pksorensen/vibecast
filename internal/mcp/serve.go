@@ -144,7 +144,7 @@ func HandleMCPServe() {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	selectedStreamID := os.Getenv("VIBECAST_STREAM_ID")
+	selectedStreamID := os.Getenv("VIBECAST_SESSION_ID")
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -274,7 +274,7 @@ func mcpToolsList() []interface{} {
 		},
 		map[string]interface{}{
 			"name":        "share_image",
-			"description": "Share an image with the live broadcast audience. The image will be queued for the stream owner's approval before being shown to viewers.",
+			"description": "Share an image with the live broadcast audience. The image will be queued for the stream owner's approval before being shown to viewers. Alias for share_media.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -291,6 +291,24 @@ func mcpToolsList() []interface{} {
 			},
 		},
 		map[string]interface{}{
+			"name":        "share_media",
+			"description": "Share any file (image, video, PDF, HTML) as a proof artifact. Images < 1 MB are sent inline; larger files and videos are uploaded to the server. The file will be queued for the stream owner's approval before being shown to viewers.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"file_path": map[string]interface{}{
+						"type":        "string",
+						"description": "Absolute path to the file to share",
+					},
+					"caption": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional caption describing the file",
+					},
+				},
+				"required": []string{"file_path"},
+			},
+		},
+		map[string]interface{}{
 			"name":        "list_sessions",
 			"description": "List all running vibecast broadcast sessions.",
 			"inputSchema": map[string]interface{}{
@@ -304,12 +322,12 @@ func mcpToolsList() []interface{} {
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"stream_id": map[string]interface{}{
+					"session_id": map[string]interface{}{
 						"type":        "string",
-						"description": "The stream ID of the session to select",
+						"description": "The session ID of the session to select",
 					},
 				},
-				"required": []string{"stream_id"},
+				"required": []string{"session_id"},
 			},
 		},
 		map[string]interface{}{
@@ -541,7 +559,7 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 			if sf == nil {
 				sf = session.FindActiveSession()
 			}
-			if sf != nil && sf.StreamID != "" {
+			if sf != nil && sf.SessionID != "" {
 				serverHost := sf.ServerHost
 				if serverHost == "" {
 					serverHost = os.Getenv("AGENTICS_SERVER")
@@ -553,7 +571,7 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 				if strings.HasPrefix(serverHost, "localhost") || strings.HasPrefix(serverHost, "127.") {
 					scheme = "http"
 				}
-				go uploadWorkspaceArchive(cwd, serverHost, scheme, sf.StreamID)
+				go uploadWorkspaceArchive(cwd, serverHost, scheme, sf.SessionID)
 			}
 		}
 
@@ -581,6 +599,7 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 		}
 
 	case "share_image":
+		// Backward-compat alias — delegate to share_media logic using image_path as file_path
 		var args struct {
 			ImagePath string `json:"image_path"`
 			Caption   string `json:"caption"`
@@ -593,35 +612,66 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 			isError = true
 			break
 		}
+		// Re-dispatch as share_media
+		remapped, _ := json.Marshal(map[string]string{"file_path": args.ImagePath, "caption": args.Caption})
+		params.Arguments = remapped
+		fallthrough
 
-		imgData, err := os.ReadFile(args.ImagePath)
-		if err != nil {
-			resultText = fmt.Sprintf("Failed to read image: %v", err)
+	case "share_media":
+		var args struct {
+			FilePath string `json:"file_path"`
+			Caption  string `json:"caption"`
+		}
+		if params.Arguments != nil {
+			json.Unmarshal(params.Arguments, &args)
+		}
+		if args.FilePath == "" {
+			resultText = "file_path is required"
 			isError = true
 			break
 		}
 
-		ext := strings.ToLower(filepath.Ext(args.ImagePath))
-		mimeType := "image/png"
-		switch ext {
-		case ".jpg", ".jpeg":
-			mimeType = "image/jpeg"
-		case ".gif":
-			mimeType = "image/gif"
-		case ".webp":
-			mimeType = "image/webp"
-		case ".svg":
-			mimeType = "image/svg+xml"
-		case ".png":
-			mimeType = "image/png"
+		fileData, err := os.ReadFile(args.FilePath)
+		if err != nil {
+			resultText = fmt.Sprintf("Failed to read file: %v", err)
+			isError = true
+			break
 		}
 
-		idBytes := make([]byte, 4)
-		rand.Read(idBytes)
-		imageID := fmt.Sprintf("%x", idBytes)
+		fileName := filepath.Base(args.FilePath)
+		ext := strings.ToLower(filepath.Ext(args.FilePath))
 
-		b64 := base64.StdEncoding.EncodeToString(imgData)
-		dataURI := fmt.Sprintf("data:%s;base64,%s", mimeType, b64)
+		mimeType := "application/octet-stream"
+		mediaType := "other"
+		switch ext {
+		case ".png":
+			mimeType = "image/png"
+			mediaType = "image"
+		case ".jpg", ".jpeg":
+			mimeType = "image/jpeg"
+			mediaType = "image"
+		case ".gif":
+			mimeType = "image/gif"
+			mediaType = "image"
+		case ".webp":
+			mimeType = "image/webp"
+			mediaType = "image"
+		case ".svg":
+			mimeType = "image/svg+xml"
+			mediaType = "image"
+		case ".mp4":
+			mimeType = "video/mp4"
+			mediaType = "video"
+		case ".webm":
+			mimeType = "video/webm"
+			mediaType = "video"
+		case ".pdf":
+			mimeType = "application/pdf"
+			mediaType = "document"
+		case ".html":
+			mimeType = "text/html"
+			mediaType = "document"
+		}
 
 		sf, err := session.ResolveTargetSession(*selectedStreamID)
 		if err != nil {
@@ -630,29 +680,99 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 			break
 		}
 
+		// Small images (<1 MB): use existing base64 inline path for speed
+		if mediaType == "image" && len(fileData) < 1024*1024 {
+			idBytes := make([]byte, 4)
+			rand.Read(idBytes)
+			imageID := fmt.Sprintf("%x", idBytes)
+
+			b64 := base64.StdEncoding.EncodeToString(fileData)
+			dataURI := fmt.Sprintf("data:%s;base64,%s", mimeType, b64)
+
+			payload := map[string]interface{}{
+				"sessionId": sf.SessionID,
+				"type":      "metadata",
+				"subtype":   "image_share",
+				"imageId":   imageID,
+				"imageData": dataURI,
+				"caption":   args.Caption,
+				"status":    "pending",
+				"timestamp": time.Now().Unix(),
+			}
+			payloadBytes, _ := json.Marshal(payload)
+			hooks.HookPostMetadata(sf, payloadBytes)
+
+			imgPayload, _ := json.Marshal(map[string]interface{}{
+				"imageId":   imageID,
+				"imageData": dataURI,
+				"caption":   args.Caption,
+				"timestamp": time.Now().Unix(),
+			})
+			control.ControlHTTPRequestWithBody(sockPath, "POST", "/image-queued", imgPayload)
+			resultText = fmt.Sprintf("Image queued for approval (id: %s)", imageID)
+			break
+		}
+
+		// Large files / videos: upload binary to server, then fan out URL-only metadata
+		serverHost := sf.ServerHost
+		if serverHost == "" {
+			serverHost = os.Getenv("AGENTICS_SERVER")
+			if serverHost == "" {
+				serverHost = "agentics.dk"
+			}
+		}
+		scheme := "https"
+		if strings.HasPrefix(serverHost, "localhost") || strings.HasPrefix(serverHost, "127.") {
+			scheme = "http"
+		}
+		uploadURL := fmt.Sprintf("%s://%s/api/lives/media/upload?sessionId=%s&mimeType=%s&fileName=%s",
+			scheme,
+			serverHost,
+			sf.SessionID,
+			url.QueryEscape(mimeType),
+			url.QueryEscape(fileName),
+		)
+
+		uploadResp, err := http.Post(uploadURL, mimeType, bytes.NewReader(fileData))
+		if err != nil || uploadResp.StatusCode != 200 {
+			errMsg := fmt.Sprintf("Upload failed")
+			if err != nil {
+				errMsg = fmt.Sprintf("Upload failed: %v", err)
+			}
+			resultText = errMsg
+			isError = true
+			break
+		}
+		defer uploadResp.Body.Close()
+
+		var uploadResult struct {
+			MediaID    string `json:"mediaId"`
+			URL        string `json:"url"`
+			StoredName string `json:"storedName"`
+		}
+		if err := json.NewDecoder(uploadResp.Body).Decode(&uploadResult); err != nil {
+			resultText = fmt.Sprintf("Failed to parse upload response: %v", err)
+			isError = true
+			break
+		}
+
 		payload := map[string]interface{}{
-			"streamId":  sf.StreamID,
+			"sessionId": sf.SessionID,
 			"type":      "metadata",
-			"subtype":   "image_share",
-			"imageId":   imageID,
-			"imageData": dataURI,
+			"subtype":   "media_share",
+			"mediaId":   uploadResult.MediaID,
+			"url":       uploadResult.URL,
+			"mimeType":  mimeType,
+			"mediaType": mediaType,
+			"fileName":  fileName,
 			"caption":   args.Caption,
 			"status":    "pending",
 			"timestamp": time.Now().Unix(),
 		}
 		payloadBytes, _ := json.Marshal(payload)
-
 		hooks.HookPostMetadata(sf, payloadBytes)
 
-		imgPayload, _ := json.Marshal(map[string]interface{}{
-			"imageId":   imageID,
-			"imageData": dataURI,
-			"caption":   args.Caption,
-			"timestamp": time.Now().Unix(),
-		})
-		control.ControlHTTPRequestWithBody(sockPath, "POST", "/image-queued", imgPayload)
-
-		resultText = fmt.Sprintf("Image queued for approval (id: %s)", imageID)
+		resultText = fmt.Sprintf("Media queued for approval (id: %s, type: %s, size: %d bytes)", uploadResult.MediaID, mediaType, len(fileData))
 
 	case "list_sessions":
 		session.CleanStaleSessions()
@@ -665,39 +785,39 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 		for _, sf := range active {
 			uptime := time.Since(time.Unix(sf.StartedAt, 0)).Truncate(time.Second)
 			selected := ""
-			if *selectedStreamID == sf.StreamID {
+			if *selectedStreamID == sf.SessionID {
 				selected = " (selected)"
 			}
 			lines = append(lines, fmt.Sprintf("- **%s**%s — %s · %s · up %s (pid %d)",
-				sf.StreamID, selected, sf.ServerHost, sf.Project, uptime, sf.PID))
+				sf.SessionID, selected, sf.ServerHost, sf.Project, uptime, sf.PID))
 		}
 		resultText = fmt.Sprintf("Active sessions (%d):\n%s", len(active), strings.Join(lines, "\n"))
 
 	case "select_session":
 		var args struct {
-			StreamID string `json:"stream_id"`
+			SessionID string `json:"session_id"`
 		}
 		if params.Arguments != nil {
 			json.Unmarshal(params.Arguments, &args)
 		}
-		if args.StreamID == "" {
-			resultText = "stream_id is required"
+		if args.SessionID == "" {
+			resultText = "session_id is required"
 			isError = true
 			break
 		}
-		sf, err := session.ResolveTargetSession(args.StreamID)
-		if err != nil && args.StreamID != "" {
-			path := filepath.Join(session.SessionsDir(), args.StreamID+".json")
+		sf, err := session.ResolveTargetSession(args.SessionID)
+		if err != nil && args.SessionID != "" {
+			path := filepath.Join(session.SessionsDir(), args.SessionID+".json")
 			sfDirect, readErr := session.ReadSessionFile(path)
 			if readErr != nil {
-				resultText = fmt.Sprintf("Session %q not found", args.StreamID)
+				resultText = fmt.Sprintf("Session %q not found", args.SessionID)
 				isError = true
 				break
 			}
 			sf = sfDirect
 		}
-		*selectedStreamID = sf.StreamID
-		resultText = fmt.Sprintf("Selected session: %s (%s · %s)", sf.StreamID, sf.ServerHost, sf.Project)
+		*selectedStreamID = sf.SessionID
+		resultText = fmt.Sprintf("Selected session: %s (%s · %s)", sf.SessionID, sf.ServerHost, sf.Project)
 
 	case "change_broadcast_url":
 		var args struct {

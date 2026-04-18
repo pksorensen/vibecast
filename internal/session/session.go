@@ -37,12 +37,12 @@ func WriteSessionFile(sf types.SessionFile) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, sf.StreamID+".json"), data, 0644)
+	return os.WriteFile(filepath.Join(dir, sf.SessionID+".json"), data, 0644)
 }
 
-// DeleteSessionFile removes a session file by stream ID.
-func DeleteSessionFile(streamID string) {
-	os.Remove(filepath.Join(SessionsDir(), streamID+".json"))
+// DeleteSessionFile removes a session file by session ID.
+func DeleteSessionFile(sessionID string) {
+	os.Remove(filepath.Join(SessionsDir(), sessionID+".json"))
 }
 
 // ReadSessionFile reads and parses a session file.
@@ -174,12 +174,12 @@ func CleanStaleSessions() {
 }
 
 // ResolveTargetSession returns the session to target for MCP tool calls.
-func ResolveTargetSession(selectedStreamID string) (*types.SessionFile, error) {
-	if selectedStreamID != "" {
-		path := filepath.Join(SessionsDir(), selectedStreamID+".json")
+func ResolveTargetSession(selectedSessionID string) (*types.SessionFile, error) {
+	if selectedSessionID != "" {
+		path := filepath.Join(SessionsDir(), selectedSessionID+".json")
 		sf, err := ReadSessionFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("session %q not found", selectedStreamID)
+			return nil, fmt.Errorf("session %q not found", selectedSessionID)
 		}
 		if sf.PID > 0 {
 			proc, err := os.FindProcess(sf.PID)
@@ -189,7 +189,7 @@ func ResolveTargetSession(selectedStreamID string) (*types.SessionFile, error) {
 				}
 			}
 		}
-		return nil, fmt.Errorf("session %q is no longer running", selectedStreamID)
+		return nil, fmt.Errorf("session %q is no longer running", selectedSessionID)
 	}
 
 	active := FindAllActiveSessions()
@@ -201,7 +201,7 @@ func ResolveTargetSession(selectedStreamID string) (*types.SessionFile, error) {
 	}
 	ids := make([]string, len(active))
 	for i, s := range active {
-		ids[i] = s.StreamID
+		ids[i] = s.SessionID
 	}
 	return nil, fmt.Errorf("multiple active sessions found (%s). Use select_session to choose one", strings.Join(ids, ", "))
 }
