@@ -573,6 +573,9 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 			"AGENTICS_JOB_MODE",
 			"AGENTICS_AUTO_GIT",
 			"AGENTICS_COMMIT_MESSAGE_HINT",
+			"AGENTICS_PROXY_URL",
+			"AGENTICS_PROXY_SOCKET",
+			"AGENTICS_PROXY_TOKEN",
 		} {
 			if val := os.Getenv(key); val != "" {
 				exec.Command("tmux", "set-environment", "-t", sessionName, key, val).Run()
