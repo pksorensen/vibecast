@@ -525,11 +525,11 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 				exec.Command("tmux", "set-environment", "-t", sessionName, key, val).Run()
 			}
 		}
-		// Append vibecast.session_id to OTEL_RESOURCE_ATTRIBUTES so Claude's telemetry
+		// Append vibecast.stream_id to OTEL_RESOURCE_ATTRIBUTES so Claude's telemetry
 		// (which runs in this tmux session) gets associated with the correct session in
 		// Next.js. Must happen AFTER the OTEL_RESOURCE_ATTRIBUTES propagation above.
 		{
-			sessionAttr := "vibecast.session_id=" + sessionID
+			sessionAttr := "vibecast.stream_id=" + sessionID
 			updated := sessionAttr
 			if existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES"); existing != "" {
 				updated = existing + "," + sessionAttr
@@ -901,9 +901,9 @@ func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 			for k, v := range serverEnv {
 				exec.Command("tmux", "set-environment", "-t", sessionName, k, v).Run()
 			}
-			// Ensure vibecast.session_id is in OTEL_RESOURCE_ATTRIBUTES
+			// Ensure vibecast.stream_id is in OTEL_RESOURCE_ATTRIBUTES
 			{
-				sessionAttr := "vibecast.session_id=" + sessionID
+				sessionAttr := "vibecast.stream_id=" + sessionID
 				existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES")
 				if v, ok := serverEnv["OTEL_RESOURCE_ATTRIBUTES"]; ok && existing == "" {
 					existing = v
@@ -973,9 +973,9 @@ func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 			for k, v := range serverEnv {
 				exec.Command("tmux", "set-environment", "-t", sessionName, k, v).Run()
 			}
-			// Ensure vibecast.session_id is in OTEL_RESOURCE_ATTRIBUTES
+			// Ensure vibecast.stream_id is in OTEL_RESOURCE_ATTRIBUTES
 			{
-				sessionAttr := "vibecast.session_id=" + sessionID
+				sessionAttr := "vibecast.stream_id=" + sessionID
 				existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES")
 				if v, ok := serverEnv["OTEL_RESOURCE_ATTRIBUTES"]; ok && existing == "" {
 					existing = v
