@@ -560,9 +560,24 @@ func handleHookSubagentStart() {
 	var hookInput struct {
 		AgentID   string `json:"agent_id"`
 		AgentType string `json:"agent_type"`
+		ToolInput struct {
+			Prompt       string `json:"prompt"`
+			Description  string `json:"description"`
+			SubagentType string `json:"subagent_type"`
+		} `json:"tool_input"`
 	}
 	if err := json.Unmarshal(stdinData, &hookInput); err != nil {
 		os.Exit(0)
+	}
+
+	// Resolve subagent prompt suffix (env var or file)
+	suffix := os.Getenv("SUBAGENT_PROMPT_SUFFIX")
+	if suffix == "" {
+		if f := os.Getenv("SUBAGENT_PROMPT_SUFFIX_FILE"); f != "" {
+			if b, err := os.ReadFile(f); err == nil {
+				suffix = strings.TrimSpace(string(b))
+			}
+		}
 	}
 
 	p := map[string]interface{}{
@@ -571,6 +586,10 @@ func handleHookSubagentStart() {
 		"subtype":        "subagent_start",
 		"agentId":        hookInput.AgentID,
 		"agentType":      hookInput.AgentType,
+		"prompt":         hookInput.ToolInput.Prompt,
+		"description":    hookInput.ToolInput.Description,
+		"subagentType":   hookInput.ToolInput.SubagentType,
+		"promptSuffix":   suffix,
 		"transcriptPath": transcriptPath,
 		"timestamp":      time.Now().Unix(),
 	}
@@ -581,6 +600,15 @@ func handleHookSubagentStart() {
 
 	payload, _ := json.Marshal(p)
 	HookPostMetadata(sf, payload)
+
+	// Inject additionalContext into the subagent if a suffix is configured
+	if suffix != "" {
+		out, _ := json.Marshal(map[string]interface{}{
+			"additionalContext": suffix,
+		})
+		os.Stdout.Write(out)
+	}
+
 	os.Exit(0)
 }
 

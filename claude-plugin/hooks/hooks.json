@@ -55,7 +55,7 @@
           {
             "type": "command",
             "command": "${VIBECAST_BIN:-${CLAUDE_PLUGIN_ROOT}/../vibecast} hook subagent-start",
-            "async": true
+            "async": false
           }
         ]
       }
