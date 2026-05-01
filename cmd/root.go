@@ -55,6 +55,9 @@ func Execute() {
 		case "cycle-agent":
 			RunCycleAgent(os.Args[2:])
 			return
+		case "viewers":
+			RunViewers()
+			return
 		}
 	}
 
@@ -158,8 +161,8 @@ func Execute() {
 	exec.Command("tmux", "set-option", "-t", lobbySession, "window-size", "largest").Run()
 	exec.Command("tmux", "set-option", "-t", lobbySession, "status", "on").Run()
 	// Subtle status bar — terminal default background, dim text, brand orange accent only on the label.
-	exec.Command("tmux", "set-option", "-t", lobbySession, "status-style", "bg=default,fg=#666666").Run()
-	exec.Command("tmux", "set-option", "-t", lobbySession, "status-left", " #[fg=#FF6B00,bold]AGENTICS LIVE#[default,fg=#666666] ").Run()
+	exec.Command("tmux", "set-option", "-t", lobbySession, "status-style", "bg=default,fg=colour250").Run()
+	exec.Command("tmux", "set-option", "-t", lobbySession, "status-left", " #[fg=colour208,bold]AGENTICS LIVE#[default,fg=colour250] ").Run()
 	exec.Command("tmux", "set-option", "-t", lobbySession, "status-left-length", "30").Run()
 	exec.Command("tmux", "set-option", "-t", lobbySession, "status-right", " Ctrl-b d → detach ").Run()
 	exec.Command("tmux", "set-option", "-t", lobbySession, "status-justify", "centre").Run()

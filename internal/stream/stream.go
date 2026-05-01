@@ -611,11 +611,16 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		}
 		exec.Command("tmux", "set-option", "-t", sessionName, "window-size", "largest").Run()
 		exec.Command("tmux", "set-option", "-t", sessionName, "status", "on").Run()
-		// Subtle status bar — terminal default bg, brand red dot for LIVE, dim grey rest.
-		exec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=default,fg=#666666").Run()
-		exec.Command("tmux", "set-option", "-t", sessionName, "status-left", " #[fg=#FF3B30,bold]●#[default,fg=#FF6B00,bold] AGENTICS LIVE#[default,fg=#666666] ").Run()
+		// Subtle status bar — terminal default bg, brand red dot for LIVE, readable gray for the rest.
+		// Using 256-color codes instead of hex so it renders on terminals without truecolor.
+		// status-interval=5 makes #() shell-format substitutions refresh every 5 s (default is 15 s).
+		exec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=default,fg=colour250").Run()
+		exec.Command("tmux", "set-option", "-t", sessionName, "status-interval", "5").Run()
+		exec.Command("tmux", "set-option", "-t", sessionName, "status-left", " #[fg=colour196,bold]●#[default,fg=colour208,bold] AGENTICS LIVE#[default,fg=colour250] ").Run()
 		exec.Command("tmux", "set-option", "-t", sessionName, "status-left-length", "50").Run()
-		exec.Command("tmux", "set-option", "-t", sessionName, "status-right", " F10 stop  •  Ctrl-b d detach ").Run()
+		exec.Command("tmux", "set-option", "-t", sessionName, "status-right",
+			fmt.Sprintf(" #[fg=colour208,bold]#(%s viewers)#[default,fg=colour250] viewers  •  F10 stop  •  Ctrl-b d detach ", vibecastPath)).Run()
+		exec.Command("tmux", "set-option", "-t", sessionName, "status-right-length", "80").Run()
 		exec.Command("tmux", "set-option", "-t", sessionName, "status-justify", "centre").Run()
 
 		// Create "help" window running fkeybar --help-screen
@@ -1016,10 +1021,15 @@ func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 			}
 			exec.Command("tmux", "set-option", "-t", sessionName, "window-size", "largest").Run()
 			exec.Command("tmux", "set-option", "-t", sessionName, "status", "on").Run()
-			exec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=#FF6B00,fg=#000000,bold").Run()
-			exec.Command("tmux", "set-option", "-t", sessionName, "status-left", " 🔴 AGENTIC LIVE ").Run()
+			// Match the fresh-start streaming status bar.
+			vibecastPathResume, _ := os.Executable()
+			exec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=default,fg=colour250").Run()
+			exec.Command("tmux", "set-option", "-t", sessionName, "status-interval", "5").Run()
+			exec.Command("tmux", "set-option", "-t", sessionName, "status-left", " #[fg=colour196,bold]●#[default,fg=colour208,bold] AGENTICS LIVE#[default,fg=colour250] ").Run()
 			exec.Command("tmux", "set-option", "-t", sessionName, "status-left-length", "50").Run()
-			exec.Command("tmux", "set-option", "-t", sessionName, "status-right", " Ctrl-b d → back to dashboard ").Run()
+			exec.Command("tmux", "set-option", "-t", sessionName, "status-right",
+				fmt.Sprintf(" #[fg=colour208,bold]#(%s viewers)#[default,fg=colour250] viewers  •  F10 stop  •  Ctrl-b d detach ", vibecastPathResume)).Run()
+			exec.Command("tmux", "set-option", "-t", sessionName, "status-right-length", "80").Run()
 			exec.Command("tmux", "set-option", "-t", sessionName, "status-justify", "centre").Run()
 
 			// Bind F-keys at the tmux session level
