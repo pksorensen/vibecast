@@ -72,6 +72,30 @@
         ]
       }
     ],
+    "TaskCreated": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${VIBECAST_BIN:-${CLAUDE_PLUGIN_ROOT}/../vibecast} hook task-created",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${VIBECAST_BIN:-${CLAUDE_PLUGIN_ROOT}/../vibecast} hook task-completed",
+            "async": true
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",

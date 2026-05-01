@@ -50,7 +50,13 @@ type InfoModel struct {
 	// Menu state (pre-stream)
 	MenuIndex int
 	menuItems []string
+	menuDescs []string
 	SubView   string // "", "settings", "sessions"
+
+	// Lobby splash/transition animation state
+	lobbyFrame      int
+	lobbyPhase      int // 0 splash, 1 transition, 2 steady
+	lobbyTransFrame int
 
 	// Settings
 	PromptSharing    bool
@@ -69,9 +75,15 @@ type InfoModel struct {
 // NewInfoModel creates the full-screen info model.
 func NewInfoModel(sessionID string) InfoModel {
 	return InfoModel{
-		SessionID:        sessionID,
-		Phase:            "menu",
-		menuItems:        []string{"Start Streaming", "Resume Session", "Settings", "Quit"},
+		SessionID: sessionID,
+		Phase:     "menu",
+		menuItems: []string{"Start Streaming", "Resume Session", "Settings", "Quit"},
+		menuDescs: []string{
+			"Launch tmux + Claude",
+			"Pick a previous Claude session",
+			"Configure broadcast options",
+			"Exit vibecast",
+		},
 		PromptSharing:    true,
 		ShareProjectInfo: true,
 		client:           NewClient(),
@@ -80,7 +92,7 @@ func NewInfoModel(sessionID string) InfoModel {
 }
 
 func (m InfoModel) Init() tea.Cmd {
-	return tea.Batch(m.pollStatus(), scheduleStatusTick())
+	return tea.Batch(m.pollStatus(), scheduleStatusTick(), ScheduleLobbyTick())
 }
 
 func (m InfoModel) pollStatus() tea.Cmd {
@@ -107,6 +119,22 @@ func (m InfoModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusTickMsg:
 		return m, tea.Batch(m.pollStatus(), scheduleStatusTick())
+
+	case LobbyTickMsg:
+		m.lobbyFrame++
+		switch m.lobbyPhase {
+		case 0:
+			if m.lobbyFrame >= lobbySplashFrames {
+				m.lobbyPhase = 1
+				m.lobbyTransFrame = 0
+			}
+		case 1:
+			m.lobbyTransFrame++
+			if m.lobbyTransFrame >= lobbyTransFrames {
+				m.lobbyPhase = 2
+			}
+		}
+		return m, ScheduleLobbyTick()
 
 	case statusUpdatedMsg:
 		if msg.Status != nil {
@@ -237,9 +265,11 @@ func (m InfoModel) View() string {
 	}
 
 	var content string
+	showFKeyRow := false
 	switch {
 	case m.Phase == "live":
 		content = m.viewLive()
+		showFKeyRow = true
 	case m.Phase == "starting":
 		content = m.viewStarting()
 	case m.SubView == "settings":
@@ -247,12 +277,16 @@ func (m InfoModel) View() string {
 	case m.SubView == "sessions":
 		content = m.viewSessions()
 	default:
-		content = m.viewMenu()
+		// New tower-anchored lobby: includes its own ↑↓/⏎/q hint, fills the screen,
+		// and animates radio waves continuously. No bottom F-key bar needed here.
+		return m.viewLobby(m.menuItems, m.menuDescs)
+	}
+
+	if !showFKeyRow {
+		return content
 	}
 
 	fkeyRow := m.renderInfoFKeyRow()
-
-	// Pin F-key row to the bottom by padding content to fill the terminal height
 	contentLines := strings.Count(content, "\n") + 1
 	fkeyLines := strings.Count(fkeyRow, "\n") + 1
 	padding := m.Height - contentLines - fkeyLines
@@ -265,9 +299,10 @@ func (m InfoModel) View() string {
 
 func (m InfoModel) renderInfoFKeyRow() string {
 	r := styles.RenderFKeyEntry
+	var entries []string
 	if m.VSCode {
-		return " " + strings.Join([]string{
-			r("^b1", " Workspace"),
+		entries = []string{
+			r("^b1", " Coding Agent"),
 			r("^b2", " New"),
 			r("^b3", " ◀"),
 			r("^b4", " ▶"),
@@ -275,18 +310,54 @@ func (m InfoModel) renderInfoFKeyRow() string {
 			r("^b6", " Restart"),
 			r("^b9", " Help"),
 			r("^b0", " Stop"),
-		}, " ")
+		}
+	} else {
+		entries = []string{
+			r("F1", " Coding Agent"),
+			r("F2", " New"),
+			r("F3", " ◀ Agent"),
+			r("F4", " Agent ▶"),
+			r("F5", " Close"),
+			r("F6", " Restart"),
+			r("F9", " Help"),
+			r("F10", " Stop"),
+		}
 	}
-	return " " + strings.Join([]string{
-		r("F1", " Workspace"),
-		r("F2", " New"),
-		r("F3", " ◀"),
-		r("F4", " ▶"),
-		r("F5", " Close"),
-		r("F6", " Restart"),
-		r("F9", " Help"),
-		r("F10", " Stop"),
-	}, " ")
+	return justifyAcrossWidth(entries, m.Width)
+}
+
+// justifyAcrossWidth distributes entries across the full terminal width by
+// padding the gaps between them. Falls back to single-space joins if the
+// width is unknown or too narrow.
+func justifyAcrossWidth(entries []string, width int) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	totalW := 0
+	for _, e := range entries {
+		totalW += lipgloss.Width(e)
+	}
+	gaps := len(entries) - 1
+	// Reserve a single-space margin on each side.
+	avail := width - 2 - totalW
+	if width <= 0 || gaps == 0 || avail <= gaps {
+		return " " + strings.Join(entries, " ")
+	}
+	gapW := avail / gaps
+	extra := avail - gapW*gaps
+	var b strings.Builder
+	b.WriteString(" ")
+	for i, e := range entries {
+		b.WriteString(e)
+		if i < gaps {
+			pad := gapW
+			if i < extra {
+				pad++
+			}
+			b.WriteString(strings.Repeat(" ", pad))
+		}
+	}
+	return b.String()
 }
 
 func (m InfoModel) viewMenu() string {
@@ -295,7 +366,7 @@ func (m InfoModel) viewMenu() string {
 
 	lines := []string{
 		"",
-		" " + titleStyle.Render("AGENTICS BROADCAST SYSTEM") + dimStyle.Render("  v0.1.0"),
+		" " + titleStyle.Render("AGENTICS BROADCAST SYSTEM") + dimStyle.Render("  v0.3.2-local"),
 		" " + dimStyle.Render("─────────────────────────────────────────"),
 		"",
 	}
@@ -347,55 +418,151 @@ func (m InfoModel) viewLive() string {
 	titleStyle := lipgloss.NewStyle().Foreground(styles.AccentColor).Bold(true)
 	dimStyle := lipgloss.NewStyle().Faint(true)
 	liveStyle := lipgloss.NewStyle().Foreground(styles.SuccessColor).Bold(true)
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666666")).Bold(true)
 
-	lines := []string{
-		"",
-		" " + liveStyle.Render("● LIVE") + "  " + titleStyle.Render("AGENTICS BROADCAST SYSTEM"),
-		" " + dimStyle.Render("─────────────────────────────────────────"),
-		"",
-		fmt.Sprintf("  Session: %-12s  Viewers: %d", m.SessionID, m.Viewers),
-		fmt.Sprintf("  Uptime:  %s", m.Uptime),
+	width := m.Width
+	if width <= 0 {
+		width = 80
+	}
+
+	// Full-width header: ● LIVE on the left, AGENTICS BROADCAST SYSTEM on the right.
+	leftLabel := liveStyle.Render("● LIVE")
+	rightLabel := titleStyle.Render("AGENTICS BROADCAST SYSTEM")
+	header := joinLeftRight(leftLabel, rightLabel, width)
+	divider := " " + dimStyle.Render(strings.Repeat("─", maxInt(1, width-2)))
+
+	// Build the left column (SESSION / JOIN / AGENTS).
+	left := []string{
+		" " + labelStyle.Render("SESSION"),
+		fmt.Sprintf("  ID:       %s", m.SessionID),
+		fmt.Sprintf("  Uptime:   %s", m.Uptime),
+		fmt.Sprintf("  Viewers:  %s", liveStyle.Render(fmt.Sprintf("%d", m.Viewers))),
 		"",
 	}
 
-	// PIN code — large block letters with label
-	if m.PinCode != "" {
-		lines = append(lines, "  "+titleStyle.Render("JOIN CODE:"))
-		lines = append(lines, "")
-		bigLines := renderBigPIN(m.PinCode)
-		for _, l := range bigLines {
-			lines = append(lines, "  "+l)
+	if m.PinCode != "" || m.URL != "" {
+		left = append(left, " "+labelStyle.Render("JOIN"))
+		if m.URL != "" {
+			left = append(left, "  "+m.URL)
 		}
-		// Small text PIN below for easy reading / copy
-		spaced := ""
-		for i, c := range m.PinCode {
-			if i > 0 {
-				spaced += "       "
+		if m.PinCode != "" {
+			left = append(left, "")
+			bigLines := renderBigPIN(m.PinCode)
+			for _, l := range bigLines {
+				left = append(left, "  "+l)
 			}
-			spaced += fmt.Sprintf("  %c   ", c)
+			spaced := ""
+			for i, c := range m.PinCode {
+				if i > 0 {
+					spaced += "       "
+				}
+				spaced += fmt.Sprintf("  %c   ", c)
+			}
+			left = append(left, "  "+dimStyle.Render(spaced))
 		}
-		lines = append(lines, "  "+dimStyle.Render(spaced))
-		lines = append(lines, "")
-	}
-
-	if m.URL != "" {
-		lines = append(lines, "  "+titleStyle.Render("LINK:")+"  "+m.URL)
-		lines = append(lines, "")
+		left = append(left, "")
 	}
 
 	if len(m.Panes) > 0 {
-		lines = append(lines, fmt.Sprintf("  Panes: %d", len(m.Panes)))
+		left = append(left, " "+labelStyle.Render(fmt.Sprintf("AGENTS  (%d)", len(m.Panes))))
 		for _, p := range m.Panes {
 			marker := "  "
+			label := fmt.Sprintf("Claude — %s", p.Name)
 			if p.Active {
 				marker = " ▸"
+				label = titleStyle.Render(label)
+			} else {
+				label = lipgloss.NewStyle().Foreground(lipgloss.Color("#CCCCCC")).Render(label)
 			}
-			lines = append(lines, marker+" "+p.Name)
+			left = append(left, marker+" "+label)
 		}
-		lines = append(lines, "")
+		left = append(left, "")
 	}
 
-	return strings.Join(lines, "\n")
+	// QR code for the join URL, if we have one.
+	var qr []string
+	qrW := 0
+	if m.URL != "" {
+		qr = renderQRCode(m.URL)
+		qrW = qrModuleWidth(m.URL)
+	}
+
+	// Decide layout: side-by-side if there is enough room next to the left column.
+	// Left column needs ~50 cols; QR is qrW cols wide. Leave 4 cols of gutter.
+	const leftColW = 50
+	const gutter = 4
+	canSideBySide := qrW > 0 && width >= leftColW+gutter+qrW
+
+	var body []string
+	if canSideBySide {
+		// Place QR starting two rows below the header so it lines up with SESSION.
+		const qrTopOffset = 1
+		n := len(left)
+		if len(qr)+qrTopOffset > n {
+			n = len(qr) + qrTopOffset
+		}
+		body = make([]string, n)
+		for i := 0; i < n; i++ {
+			var l string
+			if i < len(left) {
+				l = left[i]
+			}
+			line := padToWidth(l, leftColW+gutter)
+			qi := i - qrTopOffset
+			if qi >= 0 && qi < len(qr) {
+				line += qr[qi]
+			}
+			body[i] = line
+		}
+	} else {
+		body = left
+		if len(qr) > 0 {
+			// Place QR centered below the JOIN URL/PIN block.
+			body = append(body, "")
+			pad := (width - qrW) / 2
+			if pad < 2 {
+				pad = 2
+			}
+			leftPad := strings.Repeat(" ", pad)
+			for _, l := range qr {
+				body = append(body, leftPad+l)
+			}
+			body = append(body, "")
+		}
+	}
+
+	out := []string{"", header, divider, ""}
+	out = append(out, body...)
+	return strings.Join(out, "\n")
+}
+
+// joinLeftRight returns a single line of the given width with `left` flush-left
+// and `right` flush-right (with one-space margins on each side).
+func joinLeftRight(left, right string, width int) string {
+	leftW := lipgloss.Width(left)
+	rightW := lipgloss.Width(right)
+	gap := width - leftW - rightW - 2
+	if gap < 1 {
+		gap = 1
+	}
+	return " " + left + strings.Repeat(" ", gap) + right + " "
+}
+
+// padToWidth right-pads s with spaces so that its visible width equals w.
+// Returns s unchanged if it is already wider than w.
+func padToWidth(s string, w int) string {
+	cur := lipgloss.Width(s)
+	if cur >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-cur)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // bigDigits maps characters to 5-line tall block representations.
@@ -644,8 +811,8 @@ func (m BarModel) renderFKeyRow() string {
 		return " " + strings.Join([]string{
 			r("^b1", " Info"),
 			r("^b2", " New"),
-			r("^b3", " ◀"),
-			r("^b4", " ▶"),
+			r("^b3", " ◀ Agent"),
+			r("^b4", " Agent ▶"),
 			r("^b5", " Close"),
 			r("^b6", " Restart"),
 			r("^b9", " Help"),
@@ -655,8 +822,8 @@ func (m BarModel) renderFKeyRow() string {
 	return " " + strings.Join([]string{
 		r("F1", " Info"),
 		r("F2", " New"),
-		r("F3", " ◀"),
-		r("F4", " ▶"),
+		r("F3", " ◀ Agent"),
+		r("F4", " Agent ▶"),
 		r("F5", " Close"),
 		r("F6", " Restart"),
 		r("F9", " Help"),
@@ -725,12 +892,12 @@ func (m HelpModel) View() string {
 		"",
 		" " + heading.Render("Broadcast Controls"),
 		"",
-		"   " + fk("1") + "  Toggle between Info and Workspace",
-		"   " + fk("2") + "  New agent pane (spawn additional Claude)",
-		"   " + fk("3") + "  Previous window / agent",
-		"   " + fk("4") + "  Next window / agent",
-		"   " + fk("5") + "  Close current agent pane",
-		"   " + fk("6") + "  Restart Claude in current pane",
+		"   " + fk("1") + "  Toggle between Info and most recent Coding Agent",
+		"   " + fk("2") + "  New Coding Agent (spawn additional Claude)",
+		"   " + fk("3") + "  Previous Coding Agent (skips Info / Help)",
+		"   " + fk("4") + "  Next Coding Agent (skips Info / Help)",
+		"   " + fk("5") + "  Close current Coding Agent",
+		"   " + fk("6") + "  Restart Claude in current Coding Agent",
 	}
 	if m.VSCode {
 		lines = append(lines, "   "+fk("9")+"  This help screen")

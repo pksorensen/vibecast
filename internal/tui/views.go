@@ -65,7 +65,7 @@ func (m Model) viewSplash() string {
 
 func (m Model) viewMenu() string {
 	lines := []string{
-		"  AGENTICS BROADCAST SYSTEM          v0.1.0",
+		"  AGENTICS BROADCAST SYSTEM          v0.3.2-local",
 		"  ─────────────────────────────────────────────────────────",
 		"",
 	}

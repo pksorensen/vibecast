@@ -52,6 +52,9 @@ func Execute() {
 		case "select-workspace":
 			stream.SelectWorkspaceWindow()
 			return
+		case "cycle-agent":
+			RunCycleAgent(os.Args[2:])
+			return
 		}
 	}
 
@@ -143,15 +146,8 @@ func Execute() {
 		os.Exit(1)
 	}
 
-	// Create "help" window in lobby
-	helpCmd := vibecastPath + " fkeybar --help-screen"
-	if tp != "" {
-		helpCmd = "TERM_PROGRAM=" + tp + " " + helpCmd
-	}
-	exec.Command("tmux", "new-window", "-t", lobbySession, "-n", "help",
-		"sh", "-c", helpCmd).Run()
-	// Switch back to info window
-	exec.Command("tmux", "select-window", "-t", lobbySession+":info").Run()
+	// Help screen is reachable via F9 during streaming (see BindFKeys); don't add it
+	// as a second lobby window — it forced users to press q twice to exit (info → help → quit).
 
 	// Propagate TERM_PROGRAM so fkeybar can detect VS Code
 	if tp := os.Getenv("TERM_PROGRAM"); tp != "" {
@@ -161,8 +157,10 @@ func Execute() {
 	// Style the lobby session
 	exec.Command("tmux", "set-option", "-t", lobbySession, "window-size", "largest").Run()
 	exec.Command("tmux", "set-option", "-t", lobbySession, "status", "on").Run()
-	exec.Command("tmux", "set-option", "-t", lobbySession, "status-style", "bg=#FF6B00,fg=#000000,bold").Run()
-	exec.Command("tmux", "set-option", "-t", lobbySession, "status-left", " AGENTIC LIVE ").Run()
+	// Subtle status bar — terminal default background, dim text, brand orange accent only on the label.
+	exec.Command("tmux", "set-option", "-t", lobbySession, "status-style", "bg=default,fg=#666666").Run()
+	exec.Command("tmux", "set-option", "-t", lobbySession, "status-left", " #[fg=#FF6B00,bold]AGENTICS LIVE#[default,fg=#666666] ").Run()
+	exec.Command("tmux", "set-option", "-t", lobbySession, "status-left-length", "30").Run()
 	exec.Command("tmux", "set-option", "-t", lobbySession, "status-right", " Ctrl-b d → detach ").Run()
 	exec.Command("tmux", "set-option", "-t", lobbySession, "status-justify", "centre").Run()
 

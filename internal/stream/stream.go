@@ -66,6 +66,19 @@ func buildAppendSystemPromptFlag() string {
 	return ""
 }
 
+// readAppendSystemPrompt returns the raw system prompt text for logging purposes.
+func readAppendSystemPrompt() string {
+	if file := os.Getenv("VIBECAST_APPEND_SYSTEM_PROMPT_FILE"); file != "" {
+		if data, err := os.ReadFile(file); err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	if prompt := os.Getenv("VIBECAST_APPEND_SYSTEM_PROMPT"); prompt != "" {
+		return strings.TrimSpace(prompt)
+	}
+	return ""
+}
+
 // buildInitialPromptArg returns a shell fragment that passes the initial job prompt as
 // a positional argument to Claude. The prompt is read from the file path set in
 // VIBECAST_INITIAL_PROMPT_FILE so that arbitrary multi-line content is handled safely
@@ -229,23 +242,33 @@ func BindFKeys(sessionName string) {
 	// F1 toggle: if on info → go to most recent workspace, else → go to info.
 	// F9 toggle: if on help → go to most recent workspace, else → go to help.
 	// Uses `vibecast select-workspace` to avoid shell escaping issues in tmux bindings.
+	//
+	// All `run-shell` invocations redirect stdout+stderr to /dev/null because tmux's
+	// run-shell captures any output and displays it in a copy-mode popup over the
+	// active pane (so e.g. curl's `{"action":"stop","ok":true}` would flash on screen).
 	vibecastPath, _ := os.Executable()
-	selectWorkspace := fmt.Sprintf(`run-shell '%s select-workspace'`, vibecastPath)
+	selectWorkspace := fmt.Sprintf(`run-shell '%s select-workspace >/dev/null 2>&1'`, vibecastPath)
 
 	toggleInfoCmd := fmt.Sprintf(`if-shell -F "#{==:#{window_name},info}" "%s" "select-window -t :info"`, selectWorkspace)
 	toggleHelpCmd := fmt.Sprintf(`if-shell -F "#{==:#{window_name},help}" "%s" "select-window -t :help"`, selectWorkspace)
 
 	// Actions that go through control socket
 	curlAction := func(fkey string) string {
-		return fmt.Sprintf("run-shell 'curl -s --unix-socket %s -X POST http://localhost/fkey?key=%s'", sockPath, fkey)
+		return fmt.Sprintf("run-shell 'curl -s --unix-socket %s -X POST http://localhost/fkey?key=%s >/dev/null 2>&1'", sockPath, fkey)
+	}
+
+	// F3/F4 cycle only Coding Agent windows; "vibecast cycle-agent next|prev"
+	// lists windows and skips the special info/help/control windows.
+	cycleAgent := func(direction string) string {
+		return fmt.Sprintf(`run-shell '%s cycle-agent %s >/dev/null 2>&1'`, vibecastPath, direction)
 	}
 
 	if inVSCode {
 		// Ctrl-b + number keys
 		exec.Command("tmux", "bind-key", "-T", "prefix", "1", toggleInfoCmd).Run()
 		exec.Command("tmux", "bind-key", "-T", "prefix", "2", curlAction("f2")).Run()
-		exec.Command("tmux", "bind-key", "-T", "prefix", "3", "previous-window").Run()
-		exec.Command("tmux", "bind-key", "-T", "prefix", "4", "next-window").Run()
+		exec.Command("tmux", "bind-key", "-T", "prefix", "3", cycleAgent("prev")).Run()
+		exec.Command("tmux", "bind-key", "-T", "prefix", "4", cycleAgent("next")).Run()
 		exec.Command("tmux", "bind-key", "-T", "prefix", "5", curlAction("f5")).Run()
 		exec.Command("tmux", "bind-key", "-T", "prefix", "6", curlAction("f6")).Run()
 		exec.Command("tmux", "bind-key", "-T", "prefix", "9", toggleHelpCmd).Run()
@@ -254,8 +277,8 @@ func BindFKeys(sessionName string) {
 		// Raw F-keys (no prefix)
 		exec.Command("tmux", "bind-key", "-n", "F1", toggleInfoCmd).Run()
 		exec.Command("tmux", "bind-key", "-n", "F2", curlAction("f2")).Run()
-		exec.Command("tmux", "bind-key", "-n", "F3", "previous-window").Run()
-		exec.Command("tmux", "bind-key", "-n", "F4", "next-window").Run()
+		exec.Command("tmux", "bind-key", "-n", "F3", cycleAgent("prev")).Run()
+		exec.Command("tmux", "bind-key", "-n", "F4", cycleAgent("next")).Run()
 		exec.Command("tmux", "bind-key", "-n", "F5", curlAction("f5")).Run()
 		exec.Command("tmux", "bind-key", "-n", "F6", curlAction("f6")).Run()
 		exec.Command("tmux", "bind-key", "-n", "F9", toggleHelpCmd).Run()
@@ -588,10 +611,11 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		}
 		exec.Command("tmux", "set-option", "-t", sessionName, "window-size", "largest").Run()
 		exec.Command("tmux", "set-option", "-t", sessionName, "status", "on").Run()
-		exec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=#FF6B00,fg=#000000,bold").Run()
-		exec.Command("tmux", "set-option", "-t", sessionName, "status-left", " 🔴 AGENTIC LIVE ").Run()
+		// Subtle status bar — terminal default bg, brand red dot for LIVE, dim grey rest.
+		exec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=default,fg=#666666").Run()
+		exec.Command("tmux", "set-option", "-t", sessionName, "status-left", " #[fg=#FF3B30,bold]●#[default,fg=#FF6B00,bold] AGENTICS LIVE#[default,fg=#666666] ").Run()
 		exec.Command("tmux", "set-option", "-t", sessionName, "status-left-length", "50").Run()
-		exec.Command("tmux", "set-option", "-t", sessionName, "status-right", " Ctrl-b d → back to dashboard ").Run()
+		exec.Command("tmux", "set-option", "-t", sessionName, "status-right", " F10 stop  •  Ctrl-b d detach ").Run()
 		exec.Command("tmux", "set-option", "-t", sessionName, "status-justify", "centre").Run()
 
 		// Create "help" window running fkeybar --help-screen
@@ -726,14 +750,18 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		if shareProjectInfo {
 			go func() {
 				time.Sleep(2 * time.Second)
-				streamInfo, _ := json.Marshal(map[string]interface{}{
+				payload := map[string]interface{}{
 					"type":      "metadata",
 					"subtype":   "stream_info",
 					"owner":     projOwner,
 					"project":   projName,
 					"workspace": cwd,
 					"startedAt": sf.StartedAt,
-				})
+				}
+				if sp := readAppendSystemPrompt(); sp != "" {
+					payload["systemPrompt"] = sp
+				}
+				streamInfo, _ := json.Marshal(payload)
 				metaCh <- streamInfo
 			}()
 		}
@@ -1020,14 +1048,18 @@ func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 		if sf.Project != "" || sf.Workspace != "" {
 			go func() {
 				time.Sleep(2 * time.Second)
-				streamInfo, _ := json.Marshal(map[string]interface{}{
+				payload := map[string]interface{}{
 					"type":      "metadata",
 					"subtype":   "stream_info",
 					"owner":     sf.Owner,
 					"project":   sf.Project,
 					"workspace": sf.Workspace,
 					"startedAt": sf.StartedAt,
-				})
+				}
+				if sp := readAppendSystemPrompt(); sp != "" {
+					payload["systemPrompt"] = sp
+				}
+				streamInfo, _ := json.Marshal(payload)
 				mainPane.MetaCh <- streamInfo
 			}()
 		}

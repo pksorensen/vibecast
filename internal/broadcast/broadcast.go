@@ -228,8 +228,15 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 	// and detects the "session is too large" context-size menu to broadcast as a vote card.
 	jobMode := os.Getenv("AGENTICS_JOB_MODE") == "1"
 	trustAnsweredSnap := false
+	themeAnsweredSnap := false
+	loginAnsweredSnap := false
+	loginSuccessAnsweredSnap := false
+	securityNotesAnsweredSnap := false
+	bypassAnsweredSnap := false
 	// Track posted alp_pane question so we only post once per session-size menu appearance.
 	postedPaneQuestionId := ""
+	// Track posted onboarding_external question so we only surface the OAuth gate once per URL.
+	postedOnboardingQuestionId := ""
 	// Strip ANSI escape codes for plain-text detection (selected menu items have color codes
 	// between every word, breaking strings.Contains on the raw -e capture output).
 	ansiStripRe := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
@@ -284,6 +291,8 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 			rendered := string(out)
 
 			// In job mode, check for the workspace trust dialog in the rendered screen.
+			// Spawn mode owns the workspace (runner created the volume + clone) so VIBECAST_ALLOWED_DIRECTORIES
+			// isn't set and we trust unconditionally. In-process mode passes the explicit allowed dir for safety.
 			if jobMode && !trustAnsweredSnap {
 				if strings.Contains(rendered, "Quick safety check") {
 					allowedDir := os.Getenv("VIBECAST_ALLOWED_DIRECTORIES")
@@ -295,12 +304,14 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 						attribute.String("session.id", sessionID),
 						attribute.String("allowed_dir", allowedDir),
 					)
-					if allowedDir != "" && strings.Contains(rendered, allowedDir) {
+					// Auto-trust if allowedDir is unset (spawn-mode default) OR if the prompt's
+					// path matches the explicitly allowed dir (in-process mode).
+					if allowedDir == "" || strings.Contains(rendered, allowedDir) {
 						// The trust dialog defaults to "❯ 1. Yes, I trust this folder".
 						// Send Enter alone — sending "1" + Enter in one call doesn't
 						// register reliably in BubbleTea; Enter on the default is enough.
 						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
-						logDebug("[broadcast] auto-answered workspace trust prompt for %s\n", allowedDir)
+						logDebug("[broadcast] auto-answered workspace trust prompt (allowedDir=%q)\n", allowedDir)
 						span.SetAttributes(attribute.Bool("auto_answered", true))
 						trustAnsweredSnap = true
 					} else {
@@ -316,6 +327,145 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 
 			// Save a rolling debug capture (plain text, last 10) for post-hoc inspection.
 			savePaneCapture(plain)
+
+			// Claude Code first-run gates auto-answered in job mode.
+			// We do NOT pre-bake ~/.claude.json on the runner side because env-var providers
+			// (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, CLAUDE_CODE_USE_BEDROCK) suppress these
+			// gates upstream — pre-baking would override that. So we let Claude run its native
+			// flow and intercept here.
+			if jobMode {
+				// Post-OAuth confirmation screen — "Login successful. Press Enter to continue".
+				// No real choice — just dismiss with Enter.
+				if !loginSuccessAnsweredSnap && strings.Contains(plain, "Login successful") &&
+					strings.Contains(plain, "Press Enter to continue") {
+					tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					logDebug("[broadcast] auto-answered post-OAuth login-successful screen\n")
+					loginSuccessAnsweredSnap = true
+				}
+				// Security notes screen — appears after login, displays "Claude can make mistakes"
+				// + "prompt injection risks" + "Press Enter to continue". No real choice.
+				if !securityNotesAnsweredSnap && strings.Contains(plain, "Security notes") &&
+					strings.Contains(plain, "Press Enter to continue") {
+					tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					logDebug("[broadcast] auto-answered security-notes screen\n")
+					securityNotesAnsweredSnap = true
+				}
+				// Bypass-permissions confirmation. Default highlight is "1. No, exit" so a
+				// blind Enter would kill Claude. Job mode runs Claude with --dangerously-skip-permissions
+				// by design, so explicitly accept option 2 ("Yes, I accept"). Send the digit then Enter.
+				if !bypassAnsweredSnap && strings.Contains(plain, "Bypass Permissions mode") &&
+					strings.Contains(plain, "Yes, I accept") {
+					tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "2").Run()
+					time.Sleep(100 * time.Millisecond)
+					tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					logDebug("[broadcast] auto-answered bypass-permissions warning (option 2 — accept)\n")
+					bypassAnsweredSnap = true
+				}
+
+				// Helper for posting an alp_pane vote question. Server stores it on the task
+				// pendingQuestion; the team votes on the dashboard; existing alp_pane answer
+				// handler injects the digit (option index + 1) + Enter back into this pane.
+				postAlpPaneQuestion := func(qIdSeed, question string, options []string) {
+					hash := sha256.Sum256([]byte(qIdSeed))
+					paneQuestionId := fmt.Sprintf("alp-pane-%x", hash[:8])
+					payload, _ := json.Marshal(map[string]interface{}{
+						"sessionId":      sessionID,
+						"type":           "metadata",
+						"subtype":        "alp_pane",
+						"paneQuestionId": paneQuestionId,
+						"question":       question,
+						"options":        options,
+						"timestamp":      time.Now().Unix(),
+					})
+					metaURL := fmt.Sprintf("%s://%s/api/lives/metadata", snapSchemeBase, serverHost)
+					if resp, err := http.Post(metaURL, "application/json", bytes.NewReader(payload)); err == nil {
+						resp.Body.Close()
+						logDebug("[broadcast] alp_pane posted paneQuestionId=%s question=%q\n", paneQuestionId, question)
+					} else {
+						logDebug("[broadcast] alp_pane post error: %v\n", err)
+					}
+				}
+				// Theme picker — surface as a team-vote question. Options match Claude's menu
+				// ORDER 1..7 so the alp_pane injector's "digit by index" maps correctly.
+				if !themeAnsweredSnap && strings.Contains(plain, "Choose the text style") {
+					postAlpPaneQuestion(
+						fmt.Sprintf("onboarding-theme:%s", sessionID),
+						"Choose terminal theme for Claude Code",
+						[]string{
+							"Auto (match terminal)",
+							"Dark mode",
+							"Light mode",
+							"Dark mode (colorblind-friendly)",
+							"Light mode (colorblind-friendly)",
+							"Dark mode (ANSI colors only)",
+							"Light mode (ANSI colors only)",
+						},
+					)
+					themeAnsweredSnap = true
+				}
+				// Login method picker — surface as team-vote. To skip this gate entirely, set
+				// ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / CLAUDE_CODE_USE_BEDROCK on the runner
+				// host BEFORE the container starts; Claude then suppresses the prompt.
+				if !loginAnsweredSnap && strings.Contains(plain, "Select login method:") &&
+					strings.Contains(plain, "subscription") {
+					postAlpPaneQuestion(
+						fmt.Sprintf("onboarding-login:%s", sessionID),
+						"Choose Claude Code login method",
+						[]string{
+							"Claude account with subscription",
+							"Anthropic Console account",
+							"3rd-party platform",
+						},
+					)
+					loginAnsweredSnap = true
+				}
+			}
+
+			// OAuth URL gate — Claude prints the device-code URL and waits for the user to
+			// paste the returned code. Surface as an onboarding_external question to the
+			// dashboard AND emit a structured log line for pks-cli to mirror in its console.
+			if jobMode && postedOnboardingQuestionId == "" &&
+				strings.Contains(plain, "Paste code here") &&
+				strings.Contains(plain, "oauth/authorize") {
+
+				// Pull the URL out of the pane. URL is on its own line right after
+				// "Browser didn't open?" and may wrap across multiple lines on narrow panes.
+				oauthURLRe := regexp.MustCompile(`https?://[^\s]+oauth/authorize\?\S+`)
+				oauthURL := oauthURLRe.FindString(strings.ReplaceAll(plain, "\n", ""))
+				if oauthURL == "" {
+					// URL extraction failed — fall back to a generic message; user can copy from the pane.
+					logDebug("[broadcast] OAuth gate detected but URL extraction failed\n")
+				}
+
+				idSource := fmt.Sprintf("onboarding-oauth:%s:%s", sessionID, oauthURL)
+				hash := sha256.Sum256([]byte(idSource))
+				questionId := fmt.Sprintf("onboarding-%x", hash[:8])
+
+				question := "Sign in to Claude Code to continue"
+				payload, _ := json.Marshal(map[string]interface{}{
+					"sessionId":      sessionID,
+					"type":           "metadata",
+					"subtype":        "onboarding_external",
+					"questionId":     questionId,
+					"question":       question,
+					"actionUrl":      oauthURL,
+					"actionLabel":    "Open sign-in URL",
+					"answerLabel":    "Paste the code from the browser",
+					"provider":       "claude-subscription",
+					"timestamp":      time.Now().Unix(),
+				})
+				metaURL := fmt.Sprintf("%s://%s/api/lives/metadata", snapSchemeBase, serverHost)
+				if resp, err := http.Post(metaURL, "application/json", bytes.NewReader(payload)); err == nil {
+					resp.Body.Close()
+					postedOnboardingQuestionId = questionId
+					logDebug("[broadcast] onboarding_external posted questionId=%s url=%s\n", questionId, oauthURL)
+				} else {
+					logDebug("[broadcast] onboarding_external metadata post error: %v\n", err)
+				}
+				// Also emit a structured log line so pks-cli runner can mirror it in its console.
+				// Prefix is parsed by AgenticsRunnerStartCommand's vibecast.log tail.
+				fmt.Printf("[onboarding-prompt] kind=oauth provider=claude-subscription questionId=%s url=%s\n", questionId, oauthURL)
+			}
 
 			// Detect the "session is too large" context-size menu and broadcast it as a vote
 			// card so viewers can choose how Claude should continue. This menu appears at
@@ -376,10 +526,12 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 			logDebug("[broadcast] snapshot posted (%d bytes)\n", len(out))
 		}
 
-		// Fast initial ticker: check every 500ms for the first 30s so we catch the
-		// trust prompt quickly, then switch to the regular 15s cadence.
-		fastTicker := time.NewTicker(500 * time.Millisecond)
-		fastDeadline := time.After(30 * time.Second)
+		// Initial-onboarding ticker: poll every 2s for the first 10 minutes so we catch
+		// onboarding prompts (theme, login, OAuth, trust, post-OAuth Press-Enter screens).
+		// 10 min covers a slow OAuth flow including the user opening the URL in a browser.
+		// After that, drop to the regular 15s cadence to keep snapshot post rate sane.
+		fastTicker := time.NewTicker(2 * time.Second)
+		fastDeadline := time.After(10 * time.Minute)
 		slowTicker := time.NewTicker(15 * time.Second)
 		defer fastTicker.Stop()
 		defer slowTicker.Stop()
@@ -403,12 +555,260 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 	// the answer into Claude's pane via tmux send-keys.
 	// Covers both AskUserQuestion (tool-backed) and alp_pane (pane-detected) questions.
 	if jobMode {
+		// tmuxSend sends one or more keys to target and records a child OTEL span under parent.
+		// Keys are passed as individual arguments matching tmux send-keys semantics:
+		//   tmuxSend(ctx, parent, target, "-l", "--", text)  — literal text
+		//   tmuxSend(ctx, parent, target, "Enter")           — named key
+		tmuxSend := func(ctx context.Context, parent trace.Span, target string, keys ...string) {
+			_, s := telemetry.Tracer().Start(ctx, "vibecast.tmux.send_keys",
+				trace.WithAttributes(
+					attribute.String("tmux.target", target),
+					attribute.String("tmux.keys", strings.Join(keys, " ")),
+				))
+			args := append([]string{"send-keys", "-t", target}, keys...)
+			err := tmuxCmd(args...).Run()
+			if err != nil {
+				s.RecordError(err)
+				logDebug("[answer] tmux send-keys error target=%s keys=%v: %v\n", target, keys, err)
+			}
+			s.End()
+			_ = parent // keep reference for future parent linking
+		}
+
+		// subQuestion mirrors the per-sub-question shape the server returns for multi-step
+		// AskUserQuestion batches. Each tab in the bubble-tea wizard has its own options and
+		// multiSelect flag, so the injection loop needs them to navigate correctly rather than
+		// typing literal text into a radio/checkbox list.
+		type subQuestion struct {
+			ToolUseID      string   `json:"toolUseId"`
+			Question       string   `json:"question"`
+			Options        []string `json:"options"`
+			MultiSelect    bool     `json:"multiSelect"`
+			ResolvedAnswer *string  `json:"resolvedAnswer"`
+		}
+
+		// answerHandler encapsulates injection logic for one (questionType, claudeVersionGlob) pair.
+		// Version "*" matches any Claude Code version and is used as the default fallback.
+		// Register version-specific handlers to override behaviour when the Claude Code UI changes.
+		type answerHandler struct {
+			questionType string // "permission", "alp_pane", "tool", or "*"
+			version      string // glob pattern, e.g. "1.*", "2.*", or "*"
+			inject       func(ctx context.Context, parent trace.Span, target, answer string, options []string, multiSelect bool, subQuestions []subQuestion)
+		}
+
+		// handlers is ordered most-specific first; first match wins.
+		// To add a version-specific override, prepend it before the "*" entry:
+		//   { questionType: "tool", version: "1.*", inject: legacyRadioInject }
+		handlers := []answerHandler{
+			{
+				questionType: "permission",
+				version:      "*",
+				inject: func(ctx context.Context, parent trace.Span, target, answer string, _ []string, _ bool, _ []subQuestion) {
+					// Claude Code native tool-use confirmation. "1" = Allow, "3" = Deny.
+					key := "1"
+					if strings.EqualFold(answer, "deny") || strings.EqualFold(answer, "no") {
+						key = "3"
+					}
+					parent.SetAttributes(attribute.String("inject.method", "permission"), attribute.String("inject.key", key))
+					tmuxSend(ctx, parent, target, key)
+					time.Sleep(100 * time.Millisecond)
+					tmuxSend(ctx, parent, target, "Enter")
+					logDebug("[answer] permission injected key=%s for answer=%s\n", key, answer)
+				},
+			},
+			{
+				questionType: "alp_pane",
+				version:      "*",
+				inject: func(ctx context.Context, parent trace.Span, target, answer string, options []string, _ bool, _ []subQuestion) {
+					// Numbered menu rendered by the ALP pane UI.
+					digit := "1"
+					for i, opt := range options {
+						if strings.EqualFold(opt, answer) {
+							digit = fmt.Sprintf("%d", i+1)
+							break
+						}
+					}
+					parent.SetAttributes(attribute.String("inject.method", "alp_pane"), attribute.String("inject.digit", digit))
+					tmuxSend(ctx, parent, target, digit)
+					time.Sleep(100 * time.Millisecond)
+					tmuxSend(ctx, parent, target, "Enter")
+					logDebug("[answer] alp_pane injected digit=%s\n", digit)
+				},
+			},
+			{
+				questionType: "onboarding_external",
+				version:      "*",
+				inject: func(ctx context.Context, parent trace.Span, target, answer string, _ []string, _ bool, _ []subQuestion) {
+					// External-action onboarding (currently OAuth code paste). The user
+					// completed the action externally and the answer is the literal string
+					// to type into the prompt followed by Enter.
+					parent.SetAttributes(
+						attribute.String("inject.method", "onboarding_external"),
+						attribute.Int("inject.answer_len", len(answer)),
+					)
+					tmuxSend(ctx, parent, target, "-l", "--", answer)
+					time.Sleep(100 * time.Millisecond)
+					tmuxSend(ctx, parent, target, "Enter")
+					logDebug("[answer] onboarding_external injected (len=%d)\n", len(answer))
+				},
+			},
+			{
+				questionType: "tool",
+				version:      "*",
+				inject: func(ctx context.Context, parent trace.Span, target, answer string, options []string, multiSelect bool, subQuestions []subQuestion) {
+					// Tool question (AskUserQuestion / AskFollowupQuestion).
+					// Prefer the server-provided per-sub-question shape when present — it lets us drive
+					// the bubble-tea wizard with actual navigation (Down/Enter/Tab) per tab instead of
+					// typing literal text into a radio/checkbox list (which scrambles wizard state,
+					// especially when the batch mixes radio and multi-select questions).
+					isMultiStep := len(subQuestions) > 1
+					if isMultiStep {
+						parent.SetAttributes(
+							attribute.String("inject.method", "multi_step"),
+							attribute.Int("inject.steps", len(subQuestions)),
+						)
+						for idx, sq := range subQuestions {
+							resolved := ""
+							if sq.ResolvedAnswer != nil {
+								resolved = *sq.ResolvedAnswer
+							}
+							if sq.MultiSelect {
+								// Checkbox tab: toggle each selected option in order, then Tab to the next tab.
+								rawSelected := strings.Split(resolved, " | ")
+								selectedSet := make(map[string]bool)
+								for _, a := range rawSelected {
+									a = strings.TrimSpace(a)
+									for _, opt := range sq.Options {
+										if strings.EqualFold(opt, a) {
+											selectedSet[opt] = true
+										}
+									}
+								}
+								cur := 0
+								for i, opt := range sq.Options {
+									if selectedSet[opt] {
+										for cur < i {
+											time.Sleep(80 * time.Millisecond)
+											tmuxSend(ctx, parent, target, "Down")
+											cur++
+										}
+										time.Sleep(100 * time.Millisecond)
+										tmuxSend(ctx, parent, target, "Enter") // toggle
+									}
+								}
+								// Tab advances to the next top-level tab (next question, or Submit if this was the last).
+								time.Sleep(120 * time.Millisecond)
+								tmuxSend(ctx, parent, target, "Tab")
+							} else {
+								// Radio tab: navigate Down to the matching option, Enter auto-advances to the next tab.
+								targetIdx := 0
+								for i, opt := range sq.Options {
+									if strings.EqualFold(opt, resolved) {
+										targetIdx = i
+										break
+									}
+								}
+								for j := 0; j < targetIdx; j++ {
+									tmuxSend(ctx, parent, target, "Down")
+									time.Sleep(80 * time.Millisecond)
+								}
+								time.Sleep(100 * time.Millisecond)
+								tmuxSend(ctx, parent, target, "Enter")
+							}
+							parent.AddEvent(fmt.Sprintf("subquestion_%d_injected", idx),
+								trace.WithAttributes(
+									attribute.String("sub.tool_use_id", sq.ToolUseID),
+									attribute.Bool("sub.multi_select", sq.MultiSelect),
+									attribute.Int("sub.options_count", len(sq.Options)),
+								))
+							time.Sleep(250 * time.Millisecond)
+						}
+						// After the last sub-question, the wizard should be on the Submit tab with
+						// "Submit answers" highlighted. Enter confirms.
+						tmuxSend(ctx, parent, target, "Enter")
+					} else if len(options) > 0 {
+						if multiSelect {
+							// Checkbox list: parse pipe-separated answer, toggle each selected option in order.
+							// BubbleTea layout: [opt0][opt1]...[Type something][Submit]
+							// "Type something" is always present but not in the options slice.
+							rawSelected := strings.Split(answer, " | ")
+							selectedSet := make(map[string]bool)
+							for _, a := range rawSelected {
+								a = strings.TrimSpace(a)
+								for _, opt := range options {
+									if strings.EqualFold(opt, a) {
+										selectedSet[opt] = true
+									}
+								}
+							}
+							parent.SetAttributes(
+								attribute.String("inject.method", "multi_select_checkbox"),
+								attribute.Int("inject.selected_count", len(selectedSet)),
+							)
+							cur := 0
+							lastSelectedPos := -1
+							for i, opt := range options {
+								if selectedSet[opt] {
+									for cur < i {
+										time.Sleep(80 * time.Millisecond)
+										tmuxSend(ctx, parent, target, "Down")
+										cur++
+									}
+									time.Sleep(100 * time.Millisecond)
+									tmuxSend(ctx, parent, target, "Enter") // toggle this option
+									lastSelectedPos = i
+								}
+							}
+							if lastSelectedPos == -1 {
+								lastSelectedPos = 0 // fallback: no match, navigate from start
+							}
+							// From lastSelectedPos, navigate past remaining options + "Type something" to Submit.
+							remainingDown := len(options) - lastSelectedPos + 1
+							for i := 0; i < remainingDown; i++ {
+								time.Sleep(80 * time.Millisecond)
+								tmuxSend(ctx, parent, target, "Down")
+							}
+							time.Sleep(100 * time.Millisecond)
+							tmuxSend(ctx, parent, target, "Enter") // Submit
+						} else {
+							// Radio list: navigate to the matching option, Enter submits immediately.
+							targetIdx := 1
+							for i, opt := range options {
+								if strings.EqualFold(opt, answer) {
+									targetIdx = i + 1
+									break
+								}
+							}
+							parent.SetAttributes(
+								attribute.String("inject.method", "select_list"),
+								attribute.Int("inject.target_idx", targetIdx),
+								attribute.Bool("inject.multi_select", false),
+							)
+							for i := 1; i < targetIdx; i++ {
+								tmuxSend(ctx, parent, target, "Down")
+								time.Sleep(100 * time.Millisecond)
+							}
+							tmuxSend(ctx, parent, target, "Enter")
+						}
+					} else {
+						parent.SetAttributes(attribute.String("inject.method", "free_text"))
+						tmuxSend(ctx, parent, target, "-l", "--", answer)
+						time.Sleep(100 * time.Millisecond)
+						tmuxSend(ctx, parent, target, "Enter")
+					}
+					logDebug("[answer] tool question injected for questionId=%s\n", answer)
+				},
+			},
+		}
+
 		go func() {
 			type pendingAnswerResponse struct {
-				QuestionID   *string  `json:"questionId"`
-				QuestionType string   `json:"questionType"`
-				Options      []string `json:"options"`
-				Answer       *string  `json:"answer"`
+				QuestionID   *string       `json:"questionId"`
+				QuestionType string        `json:"questionType"`
+				Options      []string      `json:"options"`
+				Answer       *string       `json:"answer"`
+				MultiSelect  bool          `json:"multiSelect"`
+				SubQuestions []subQuestion `json:"subQuestions"`
 			}
 			injectionTarget := "vibecast-" + sessionID + ":" + paneId + ".0"
 			lastInjectedQuestionID := ""
@@ -421,7 +821,8 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 				case <-done:
 					return
 				case <-ticker.C:
-					_, pollSpan := telemetry.Tracer().Start(context.Background(), "vibecast.answer.poll",
+					pollCtx := context.Background()
+					_, pollSpan := telemetry.Tracer().Start(pollCtx, "vibecast.answer.poll",
 						trace.WithAttributes(
 							attribute.String("session.id", sessionID),
 							attribute.String("poll.url", pollURL),
@@ -460,7 +861,8 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 					lastInjectedQuestionID = qID
 					logDebug("[answer] injecting answer %q for questionId=%s type=%s\n", answer, qID, r.QuestionType)
 
-					_, injectSpan := telemetry.Tracer().Start(context.Background(), "vibecast.answer.inject",
+					injectCtx := context.Background()
+					_, injectSpan := telemetry.Tracer().Start(injectCtx, "vibecast.answer.inject",
 						trace.WithAttributes(
 							attribute.String("session.id", sessionID),
 							attribute.String("question.id", qID),
@@ -471,80 +873,24 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 							}()),
 						))
 
-					if r.QuestionType == "permission" {
-						// Claude Code native file-create/overwrite confirmation TUI.
-						// Options are ["Allow", "Deny"] (or similar). The TUI is a BubbleTea
-						// selectlist: "1. Yes  2. Yes, and allow settings  3. No".
-						// Allow → press "1" + Enter; Deny → press "3" + Enter.
-						key := "1"
-						if strings.EqualFold(answer, "deny") || strings.EqualFold(answer, "no") {
-							key = "3"
+					// Select the handler: match questionType then version "*" fallback.
+					questionType := r.QuestionType
+					if questionType != "permission" && questionType != "alp_pane" && questionType != "onboarding_external" {
+						questionType = "tool"
+					}
+					var selected *answerHandler
+					for i := range handlers {
+						h := &handlers[i]
+						if h.questionType == questionType || h.questionType == "*" {
+							selected = h
+							break
 						}
-						injectSpan.SetAttributes(attribute.String("inject.method", "permission"), attribute.String("inject.key", key))
-						tmuxCmd("send-keys", "-t", injectionTarget, key).Run()
-						time.Sleep(100 * time.Millisecond)
-						tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
-						logDebug("[answer] permission injected key=%s for answer=%s\n", key, answer)
-					} else if r.QuestionType == "alp_pane" {
-						// Numbered menu: map answer label to 1-based digit.
-						digit := "1"
-						for i, opt := range r.Options {
-							if strings.EqualFold(opt, answer) {
-								digit = fmt.Sprintf("%d", i+1)
-								break
-							}
-						}
-						tmuxCmd("send-keys", "-t", injectionTarget, digit).Run()
-						time.Sleep(100 * time.Millisecond)
-						tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
-						injectSpan.SetAttributes(attribute.String("inject.method", "alp_pane"), attribute.String("inject.digit", digit))
-						logDebug("[answer] alp_pane injected digit=%s\n", digit)
+					}
+					if selected != nil {
+						selected.inject(injectCtx, injectSpan, injectionTarget, answer, r.Options, r.MultiSelect, r.SubQuestions)
 					} else {
-						// Tool question (AskUserQuestion / AskFollowupQuestion).
-						// Answer may be a single option label or a multi-step Q&A block
-						// (paragraphs separated by \n\n, each "question\nanswer").
-						paragraphs := strings.Split(answer, "\n\n")
-						isMultiStep := len(paragraphs) > 1 && len(r.Options) == 0
-						if isMultiStep {
-							injectSpan.SetAttributes(attribute.String("inject.method", "multi_step"), attribute.Int("inject.steps", len(paragraphs)))
-							for _, para := range paragraphs {
-								lines := strings.SplitN(strings.TrimSpace(para), "\n", 2)
-								if len(lines) < 2 {
-									continue
-								}
-								stepAnswer := strings.TrimSpace(lines[1])
-								tmuxCmd("send-keys", "-t", injectionTarget, "-l", "--", stepAnswer).Run()
-								time.Sleep(200 * time.Millisecond)
-								tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
-								time.Sleep(300 * time.Millisecond)
-							}
-							// Tab to Submit button then confirm
-							tmuxCmd("send-keys", "-t", injectionTarget, "Tab").Run()
-							time.Sleep(100 * time.Millisecond)
-							tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
-						} else if len(r.Options) > 0 {
-							// Single-step with known options: navigate BubbleTea selectlist.
-							targetIdx := 1
-							for i, opt := range r.Options {
-								if strings.EqualFold(opt, answer) {
-									targetIdx = i + 1
-									break
-								}
-							}
-							injectSpan.SetAttributes(attribute.String("inject.method", "select_list"), attribute.Int("inject.target_idx", targetIdx))
-							for i := 1; i < targetIdx; i++ {
-								tmuxCmd("send-keys", "-t", injectionTarget, "Down").Run()
-								time.Sleep(100 * time.Millisecond)
-							}
-							tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
-						} else {
-							// Free text: type directly.
-							injectSpan.SetAttributes(attribute.String("inject.method", "free_text"))
-							tmuxCmd("send-keys", "-t", injectionTarget, "-l", "--", answer).Run()
-							time.Sleep(100 * time.Millisecond)
-							tmuxCmd("send-keys", "-t", injectionTarget, "Enter").Run()
-						}
-						logDebug("[answer] tool question injected for questionId=%s\n", qID)
+						logDebug("[answer] no handler for questionType=%s\n", r.QuestionType)
+						injectSpan.SetAttributes(attribute.String("inject.method", "no_handler"))
 					}
 					injectSpan.End()
 				}
