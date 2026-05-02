@@ -1,0 +1,26 @@
+{
+  "name": "vibecast",
+  "version": "0.1.19",
+  "description": "Broadcast your agentic coding session to the world in real-time",
+  "bin": {
+    "vibecast": "bin/vibecast"
+  },
+  "optionalDependencies": {
+    "@agentics-live/linux-x64": "0.1.0",
+    "@agentics-live/linux-arm64": "0.1.0",
+    "@agentics-live/darwin-x64": "0.1.0",
+    "@agentics-live/darwin-arm64": "0.1.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pksorensen/vibecast"
+  },
+  "keywords": [
+    "cli",
+    "streaming",
+    "terminal",
+    "live",
+    "agentic"
+  ]
+}

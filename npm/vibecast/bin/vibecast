@@ -1,0 +1,40 @@
+#!/usr/bin/env node
+
+const { execFileSync } = require("child_process");
+const path = require("path");
+
+const PLATFORMS = {
+  "linux-x64": "@agentics-live/linux-x64",
+  "linux-arm64": "@agentics-live/linux-arm64",
+  "darwin-x64": "@agentics-live/darwin-x64",
+  "darwin-arm64": "@agentics-live/darwin-arm64",
+};
+
+const platformKey = `${process.platform}-${process.arch}`;
+const pkg = PLATFORMS[platformKey];
+
+if (!pkg) {
+  console.error(
+    `vibecast: unsupported platform ${process.platform}-${process.arch}`
+  );
+  console.error(`Supported platforms: ${Object.keys(PLATFORMS).join(", ")}`);
+  process.exit(1);
+}
+
+let binary;
+try {
+  binary = require.resolve(`${pkg}/bin/vibecast`);
+} catch {
+  console.error(`vibecast: failed to find binary package ${pkg}`);
+  console.error(
+    "This may mean the optional dependency was not installed for your platform."
+  );
+  console.error("Try reinstalling: npm install vibecast");
+  process.exit(1);
+}
+
+try {
+  execFileSync(binary, process.argv.slice(2), { stdio: "inherit" });
+} catch (e) {
+  process.exit(e.status ?? 1);
+}

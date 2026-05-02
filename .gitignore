@@ -1,9 +1,10 @@
 # Local test binaries
-vibecast
-agentic-live
+/vibecast
+/agentic-live
 
 # Demo/exploratory files
 demos/
 
 # Built platform binaries (built in CI)
 npm/*/bin/vibecast
+!npm/vibecast/bin/vibecast
