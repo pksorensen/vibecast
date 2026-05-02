@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.21](https://github.com/pksorensen/vibecast/compare/v0.1.20...v0.1.21) (2026-05-02)
+
+
+### Bug Fixes
+
+* **npm:** track wrapper package.json (gitignore over-match) ([b4529bd](https://github.com/pksorensen/vibecast/commit/b4529bd8b18b05c353e3f62e4c73485b34ad1099))
+
 ## [0.1.20](https://github.com/pksorensen/vibecast/compare/v0.1.19...v0.1.20) (2026-05-02)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "vibecast",
-  "version": "0.1.19",
+  "version": "0.1.21",
   "description": "Broadcast your agentic coding session to the world in real-time",
   "bin": {
     "vibecast": "bin/vibecast"
