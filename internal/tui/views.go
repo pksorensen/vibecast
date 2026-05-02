@@ -10,6 +10,7 @@ import (
 	"github.com/pksorensen/vibecast/internal/session"
 	"github.com/pksorensen/vibecast/internal/styles"
 	"github.com/pksorensen/vibecast/internal/types"
+	"github.com/pksorensen/vibecast/internal/util"
 )
 
 // View renders the current state.
@@ -293,6 +294,20 @@ func (m Model) viewLive() string {
 		lines = append(lines, "")
 		urlLine := fmt.Sprintf("   LINK:  %s", m.StreamURL)
 		lines = append(lines, urlLine)
+		joinURL := ""
+		if m.Status != nil {
+			m.Status.Mu.Lock()
+			host := m.Status.ServerHost
+			m.Status.Mu.Unlock()
+			if host != "" {
+				joinURL = util.BuildJoinURL(host)
+			}
+		}
+		if joinURL != "" {
+			lines = append(lines, fmt.Sprintf("   PIN:   %s   (%s)", m.PinCode, joinURL))
+		} else {
+			lines = append(lines, fmt.Sprintf("   PIN:   %s", m.PinCode))
+		}
 		lines = append(lines, "")
 	}
 

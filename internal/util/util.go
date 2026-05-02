@@ -79,6 +79,15 @@ func BuildViewerURL(serverHost, broadcastID string) string {
 	return fmt.Sprintf("https://%s/live/%s", host, broadcastID)
 }
 
+// BuildJoinURL constructs the PIN-entry join URL for a given server host.
+func BuildJoinURL(serverHost string) string {
+	if IsLocalHost(serverHost) {
+		return fmt.Sprintf("http://%s/join", serverHost)
+	}
+	host := strings.Split(serverHost, ":")[0]
+	return fmt.Sprintf("https://%s/join", host)
+}
+
 // GetProjectName returns the project name (without owner prefix).
 // Uses AGENTICS_PROJECT env var first, then custom name, then directory basename.
 func GetProjectName(customName string) string {

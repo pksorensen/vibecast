@@ -2,6 +2,7 @@ package fkeybar
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -443,9 +444,18 @@ func (m InfoModel) viewLive() string {
 	if m.PinCode != "" || m.URL != "" {
 		left = append(left, " "+labelStyle.Render("JOIN"))
 		if m.URL != "" {
-			left = append(left, "  "+m.URL)
+			left = append(left, "  LINK:  "+m.URL)
 		}
 		if m.PinCode != "" {
+			joinURL := ""
+			if u, err := url.Parse(m.URL); err == nil && u.Host != "" {
+				joinURL = u.Scheme + "://" + u.Host + "/join"
+			}
+			pinLine := fmt.Sprintf("  PIN:   %s", m.PinCode)
+			if joinURL != "" {
+				pinLine += "   " + dimStyle.Render("("+joinURL+")")
+			}
+			left = append(left, pinLine)
 			left = append(left, "")
 			bigLines := renderBigPIN(m.PinCode)
 			for _, l := range bigLines {
