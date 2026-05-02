@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      version: ${{ steps.release.outputs.version }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-cli:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Build binaries
+        run: bash scripts/build-npm.sh
+
+      - name: Sync version to npm packages
+        run: |
+          if [ -n "${{ needs.release-please.outputs.version }}" ]; then
+            VERSION="${{ needs.release-please.outputs.version }}"
+          else
+            VERSION=$(jq -r '.["."]' .release-please-manifest.json)
+          fi
+          NPM_DIR="npm"
+
+          # Update all platform packages
+          for dir in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            jq --arg v "$VERSION" '.version = $v' "$NPM_DIR/$dir/package.json" > tmp.json && mv tmp.json "$NPM_DIR/$dir/package.json"
+          done
+
+          # Update main package and its optional dependencies
+          jq --arg v "$VERSION" '
+            .version = $v |
+            .optionalDependencies = (
+              .optionalDependencies | to_entries | map(.value = $v) | from_entries
+            )
+          ' "$NPM_DIR/vibecast/package.json" > tmp.json && mv tmp.json "$NPM_DIR/vibecast/package.json"
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          NPM_DIR="npm"
+          for dir in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            echo "Publishing @agentics-live/$dir..."
+            cd "$NPM_DIR/$dir"
+            npm publish --access public
+            cd -
+          done
+
+      - name: Publish main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd npm/vibecast
+          npm publish --access public

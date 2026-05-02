@@ -1,0 +1,44 @@
+name: Setup npm Federated Credentials (OIDC)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Configure npm auth
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm whoami
+          echo "Authenticated as: $(npm whoami)"
+
+      - name: Ensure @agentics-live org packages exist
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PACKAGES=(
+            "@agentics-live/linux-x64"
+            "@agentics-live/linux-arm64"
+            "@agentics-live/darwin-x64"
+            "@agentics-live/darwin-arm64"
+            "vibecast"
+          )
+
+          for pkg in "${PACKAGES[@]}"; do
+            echo ""
+            echo "=== Checking $pkg ==="
+            if npm view "$pkg" version 2>/dev/null; then
+              echo "$pkg already exists on npm"
+            else
+              echo "$pkg not yet published — will be created on first release"
+            fi
+          done
