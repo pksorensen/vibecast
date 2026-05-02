@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.20](https://github.com/pksorensen/vibecast/compare/v0.1.19...v0.1.20) (2026-05-02)
+
+
+### Features
+
+* add system prompt logging and cycle agent functionality ([1f1cd09](https://github.com/pksorensen/vibecast/commit/1f1cd0969dbd7e576ee7949fba06027541489d30))
+* **broadcast:** show PIN + /join URL alongside LINK in TUI ([654c8fe](https://github.com/pksorensen/vibecast/commit/654c8fecc15c755165af133fae40faa01f49dc3c))
+* **docs:** simplify README for end users; move technicals to docs/ ([c392d3b](https://github.com/pksorensen/vibecast/commit/c392d3bb5b20126fa81821a535918b0ebfd6e334))
+* enhance hook commands and add task management hooks ([a03a07c](https://github.com/pksorensen/vibecast/commit/a03a07cd94bec248a1798d04d62670dec2913a8c))
+* enhance session management and telemetry integration for Claude Code ([6470788](https://github.com/pksorensen/vibecast/commit/6470788aaf90ac8ecf02d22d8d6fd1da25b32507))
+* **hooks:** subagentPromptAppendix via SubagentStart hook ([f9a7b4a](https://github.com/pksorensen/vibecast/commit/f9a7b4acb996a4db4311fb71220e2076883b5762))
+* **hooks:** update hooks, mcp serve, and stream with plugin support ([d470f56](https://github.com/pksorensen/vibecast/commit/d470f5668125207a63cd40cc2ca24325a0f85811))
+* released code opensource ([5d8240a](https://github.com/pksorensen/vibecast/commit/5d8240a1bddce068bc1186689b0f583c48583c84))
+* **viewers:** add RunViewers command to display current viewer count ([677469c](https://github.com/pksorensen/vibecast/commit/677469c6f324fb4f0d06138392ccb161136d3a39))
+
+
+### Bug Fixes
+
+* **otel:** rename vibecast.session_id → vibecast.stream_id in OTEL_RESOURCE_ATTRIBUTES ([35d340d](https://github.com/pksorensen/vibecast/commit/35d340d9408331f64e7c07163ec43dfa7336d99a))
+* **stream:** propagate AGENTICS_PROXY_* env vars into tmux session ([7fea32d](https://github.com/pksorensen/vibecast/commit/7fea32d4abf6b658f063f7ab1425d3866fc950fa))
+
 ## [0.1.19](https://github.com/pksorensen/agentic-live-www/compare/vibecast-v0.1.18...vibecast-v0.1.19) (2026-03-29)
 
 
