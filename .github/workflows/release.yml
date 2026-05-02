@@ -67,20 +67,16 @@ jobs:
           ' "$NPM_DIR/vibecast/package.json" > tmp.json && mv tmp.json "$NPM_DIR/vibecast/package.json"
 
       - name: Publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           NPM_DIR="npm"
           for dir in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
             echo "Publishing @agentics-live/$dir..."
             cd "$NPM_DIR/$dir"
-            npm publish --access public
+            npm publish --access public --provenance
             cd -
           done
 
       - name: Publish main package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd npm/vibecast
-          npm publish --access public
+          npm publish --access public --provenance
