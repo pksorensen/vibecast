@@ -83,6 +83,9 @@ type SharedStatus struct {
 	ServerHost      string
 	ServerConn      net.Conn
 	OtelShutdown    func()
+	// Extra attributes and plugin names passed via --attr / --plugin flags
+	Attrs       map[string]string
+	PluginNames []string
 	// Pane tracking for fkeybar
 	Panes         []PaneStatus
 	ActivePaneIdx int

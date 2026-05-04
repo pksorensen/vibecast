@@ -46,6 +46,43 @@ func InjectMCPConfig() error {
 	return os.WriteFile(mcpPath, out, 0644)
 }
 
+// InjectPluginMCP adds a named plugin MCP server entry to .mcp.json.
+func InjectPluginMCP(pluginName, exePath string, env map[string]string) error {
+	mcpPath := ".mcp.json"
+
+	var config map[string]interface{}
+	data, err := os.ReadFile(mcpPath)
+	if err != nil {
+		config = map[string]interface{}{
+			"mcpServers": map[string]interface{}{},
+		}
+	} else {
+		if err := json.Unmarshal(data, &config); err != nil {
+			config = map[string]interface{}{
+				"mcpServers": map[string]interface{}{},
+			}
+		}
+	}
+
+	servers, ok := config["mcpServers"].(map[string]interface{})
+	if !ok {
+		servers = map[string]interface{}{}
+		config["mcpServers"] = servers
+	}
+
+	servers[pluginName] = map[string]interface{}{
+		"command": exePath,
+		"args":    []string{"mcp", "serve", "--plugin", pluginName},
+		"env":     env,
+	}
+
+	out, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(mcpPath, out, 0644)
+}
+
 // RemoveMCPConfig removes the vibecast MCP server from .mcp.json.
 func RemoveMCPConfig() {
 	mcpPath := ".mcp.json"

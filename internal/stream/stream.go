@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/pksorensen/vibecast/internal/broadcast"
 	"github.com/pksorensen/vibecast/internal/control"
 	"github.com/pksorensen/vibecast/internal/hooks"
+	"github.com/pksorensen/vibecast/internal/mcp"
 	"github.com/pksorensen/vibecast/internal/session"
 	"github.com/pksorensen/vibecast/internal/telemetry"
 	"github.com/pksorensen/vibecast/internal/types"
@@ -662,6 +664,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 				"sessionId":   sessionID,
 				"broadcastId": broadcastID,
 				"event":       "start",
+				"attributes":  status.Attrs,
 			}
 			if token, claims, err := auth.GetValidToken(); err == nil && token != "" {
 				eventBody["user"] = claims
@@ -670,10 +673,17 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 			resp, err := http.Post(apiURL, "application/json", bytes.NewReader(bodyBytes))
 			if err == nil {
 				defer resp.Body.Close()
+				type vibegameInfo struct {
+					SlotIndex int    `json:"slotIndex"`
+					Token     string `json:"token"`
+					GameType  string `json:"gameType"`
+					BotWsUrl  string `json:"botWsUrl"`
+				}
 				var result struct {
-					OK  bool              `json:"ok"`
-					Pin string            `json:"pin"`
-					Env map[string]string `json:"env"`
+					OK       bool              `json:"ok"`
+					Pin      string            `json:"pin"`
+					Env      map[string]string `json:"env"`
+					Vibegame *vibegameInfo     `json:"vibegame"`
 				}
 				if json.NewDecoder(resp.Body).Decode(&result) == nil && result.Pin != "" {
 					pinCode = result.Pin
@@ -706,6 +716,37 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 					os.Setenv(k, v)
 					exec.Command("tmux", "set-environment", "-t", sessionName, k, v).Run()
 					logDebug("[stream] set env %s=%s\n", k, v)
+				}
+				// Inject vibegame env vars if server returned a slot assignment.
+				if result.Vibegame != nil {
+					vg := result.Vibegame
+					gameID := status.Attrs["game-id"]
+					for _, kv := range [][2]string{
+						{"VIBEGAME_SLOT", strconv.Itoa(vg.SlotIndex)},
+						{"VIBEGAME_TOKEN", vg.Token},
+						{"VIBEGAME_GAME_TYPE", vg.GameType},
+						{"VIBEGAME_BOT_WS_URL", vg.BotWsUrl},
+						{"VIBEGAME_GAME_ID", gameID},
+						{"VIBEGAME_SERVER", serverHost},
+					} {
+						exec.Command("tmux", "set-environment", "-t", sessionName, kv[0], kv[1]).Run()
+						logDebug("[stream] set vibegame env %s=%s\n", kv[0], kv[1])
+					}
+					// Inject plugin MCP entry if the vibegame plugin was requested.
+					for _, p := range status.PluginNames {
+						if p == "vibegame" {
+							exePath, _ := os.Executable()
+							mcp.InjectPluginMCP("vibegame", exePath, map[string]string{
+								"VIBEGAME_GAME_ID":    gameID,
+								"VIBEGAME_SLOT":       strconv.Itoa(vg.SlotIndex),
+								"VIBEGAME_TOKEN":      vg.Token,
+								"VIBEGAME_GAME_TYPE":  vg.GameType,
+								"VIBEGAME_BOT_WS_URL": vg.BotWsUrl,
+								"VIBEGAME_SERVER":     serverHost,
+							})
+							break
+						}
+					}
 				}
 			}
 			if pinCode == "" {

@@ -61,6 +61,19 @@ func Execute() {
 		}
 	}
 
+	// Pre-parse --attr KEY VALUE and --plugin NAME before the main flag loop.
+	attrs := map[string]string{}
+	var pluginNames []string
+	for i := 1; i < len(os.Args); i++ {
+		if os.Args[i] == "--attr" && i+2 < len(os.Args) {
+			attrs[os.Args[i+1]] = os.Args[i+2]
+			i += 2
+		} else if os.Args[i] == "--plugin" && i+1 < len(os.Args) {
+			pluginNames = append(pluginNames, os.Args[i+1])
+			i++
+		}
+	}
+
 	// Parse flags
 	var resumeSessionID string
 	var broadcastID string
@@ -94,7 +107,7 @@ func Execute() {
 	// Clean up stale sessions
 	session.CleanStaleSessions()
 
-	status := &types.SharedStatus{Phase: "menu", OtelShutdown: otelShutdown}
+	status := &types.SharedStatus{Phase: "menu", OtelShutdown: otelShutdown, Attrs: attrs, PluginNames: pluginNames}
 	defer func() {
 		status.Mu.Lock()
 		fn := status.OtelShutdown
