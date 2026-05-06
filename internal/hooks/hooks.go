@@ -378,8 +378,10 @@ func handleHookSession() {
 		broadcastID = sf.SessionID
 	}
 	viewerURL := util.BuildViewerURL(sf.ServerHost, broadcastID)
+	baseContext := fmt.Sprintf("This session is being broadcasted online at %s. Avoid showing sensitive secrets, API keys, or passwords in your output.", viewerURL)
+
 	output, _ := json.Marshal(map[string]interface{}{
-		"additionalContext": fmt.Sprintf("This session is being broadcasted online at %s. Avoid showing sensitive secrets, API keys, or passwords in your output.", viewerURL),
+		"additionalContext": baseContext,
 	})
 	os.Stdout.Write(output)
 	os.Exit(0)
