@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.22](https://github.com/pksorensen/vibecast/compare/v0.1.21...v0.1.22) (2026-05-06)
+
+
+### Features
+
+* **stream:** simplify environment variable injection and remove unused vibegame struct ([2993bd7](https://github.com/pksorensen/vibecast/commit/2993bd767e5fa39927c34189b52ab1e31a5fad1b))
+* **vibegame:** add --attr/--plugin flags, vibegame env injection, and InjectPluginMCP ([a66c6df](https://github.com/pksorensen/vibecast/commit/a66c6df565e586c42d8c5edcf950888b0a1b43b3))
+
 ## [0.1.21](https://github.com/pksorensen/vibecast/compare/v0.1.20...v0.1.21) (2026-05-02)
 
 
