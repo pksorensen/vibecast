@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -52,6 +53,15 @@ func GenerateUUIDv4() string {
 	uuid[8] = (uuid[8] & 0x3f) | 0x80 // variant 1
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
+}
+
+// uuidv4Re matches lower/upper-case UUIDv4 strings. Used to guard --session-id
+// inputs against vibecast's 8-char session IDs leaking through.
+var uuidv4Re = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
+
+// IsUUIDv4 reports whether s is a syntactically valid UUIDv4.
+func IsUUIDv4(s string) bool {
+	return uuidv4Re.MatchString(s)
 }
 
 // GetServerHost returns the AGENTICS_SERVER env var (or the deprecated AGENTIC_SERVER) or the default host.

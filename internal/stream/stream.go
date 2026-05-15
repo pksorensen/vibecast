@@ -88,14 +88,43 @@ func readAppendSystemPrompt() string {
 // NOTE: passing a positional argument to claude starts interactive mode with that text
 // as the first user message. It is NOT the same as -p (print mode). -p causes Claude
 // to exit after responding; a positional arg keeps Claude interactive.
+//
+// Defensive: if the env var points to a missing or empty file we DROP the argument
+// instead of producing `"$(cat 'missing')"` (which silently expands to ""). That used
+// to give Claude an empty positional arg and land it on the welcome screen with no
+// task — looked identical to "claude is fine, just waiting for input." Now we emit
+// a vibecast.initial_prompt.missing span event so the misconfig is visible in OTEL.
 func buildInitialPromptArg() string {
-	if file := os.Getenv("VIBECAST_INITIAL_PROMPT_FILE"); file != "" {
-		// Shell-escape single quotes in the file path
-		escapedPath := strings.ReplaceAll(file, "'", "'\"'\"'")
-		// "$(cat 'path')" expands to file content as a single argument, preserving newlines.
-		return " \"$(cat '" + escapedPath + "')\""
+	file := os.Getenv("VIBECAST_INITIAL_PROMPT_FILE")
+	if file == "" {
+		return ""
 	}
-	return ""
+	info, err := os.Stat(file)
+	if err != nil || info.Size() == 0 {
+		_, span := telemetry.Tracer().Start(context.Background(), "vibecast.initial_prompt.missing",
+			trace.WithAttributes(
+				attribute.String("file", file),
+				attribute.Bool("file.exists", err == nil),
+			))
+		if err != nil {
+			span.SetAttributes(attribute.String("error", err.Error()))
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetAttributes(attribute.Int64("file.size", info.Size()))
+			missErr := fmt.Errorf("VIBECAST_INITIAL_PROMPT_FILE points to empty file: %s", file)
+			span.RecordError(missErr)
+			span.SetStatus(codes.Error, missErr.Error())
+		}
+		span.End()
+		logDebug("[stream] VIBECAST_INITIAL_PROMPT_FILE=%s missing or empty (err=%v) — dropping --prompt arg\n", file, err)
+		fmt.Fprintf(os.Stderr, "[initial-prompt-missing] file=%s exists=%t\n", file, err == nil)
+		return ""
+	}
+	// Shell-escape single quotes in the file path
+	escapedPath := strings.ReplaceAll(file, "'", "'\"'\"'")
+	// "$(cat 'path')" expands to file content as a single argument, preserving newlines.
+	return " \"$(cat '" + escapedPath + "')\""
 }
 
 // resolveWorkDir returns the directory Claude should start in.
@@ -116,14 +145,26 @@ func resolveWorkDir() string {
 	return ""
 }
 
+// claudeSessionIDFlag returns " --session-id <id>" only when id is a valid UUIDv4.
+// Claude rejects non-UUID values and exits immediately — passing vibecast's 8-char
+// session id here used to kill the pane silently (see auth_recovery incident).
+func claudeSessionIDFlag(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	if !util.IsUUIDv4(sessionID) {
+		logDebug("[claude-cmd] dropping --session-id %q: not a UUIDv4\n", sessionID)
+		return ""
+	}
+	return " --session-id " + sessionID
+}
+
 func buildClaudeCommand(claudePath string, sessionID string) string {
 	cmd := claudePath + " --dangerously-skip-permissions"
 	cmd += buildPluginFlags()
 	cmd += buildAppendSystemPromptFlag()
 	cmd += buildInitialPromptArg()
-	if sessionID != "" {
-		cmd += " --session-id " + sessionID
-	}
+	cmd += claudeSessionIDFlag(sessionID)
 	return cmd
 }
 
@@ -131,8 +172,11 @@ func buildClaudeResumeCommand(claudePath string, sessionID string) string {
 	pluginFlags := buildPluginFlags()
 	promptFlag := buildAppendSystemPromptFlag()
 	initialPrompt := buildInitialPromptArg()
-	if sessionID != "" {
+	if sessionID != "" && util.IsUUIDv4(sessionID) {
 		return claudePath + " --dangerously-skip-permissions" + pluginFlags + promptFlag + " --resume " + sessionID + initialPrompt
+	}
+	if sessionID != "" {
+		logDebug("[claude-cmd] dropping --resume %q: not a UUIDv4, falling back to --continue\n", sessionID)
 	}
 	return claudePath + " --dangerously-skip-permissions" + pluginFlags + promptFlag + " --continue" + initialPrompt
 }
@@ -147,10 +191,26 @@ func DoRestartClaude(sessionName string, resume bool, claudeSessionID string, pa
 	target := sessionName + ":" + windowName + ".0" // top pane (Claude), not the fkeybar
 	logDebug("[restart] starting restart for target=%s\n", target)
 
+	_, span := telemetry.Tracer().Start(context.Background(), "vibecast.claude.restart",
+		trace.WithAttributes(
+			attribute.String("tmux.session", sessionName),
+			attribute.String("tmux.target", target),
+			attribute.String("pane.window", windowName),
+			attribute.String("claude.session_id", claudeSessionID),
+			attribute.Bool("claude.resume", resume),
+		))
+	defer span.End()
+
+	fail := func(err error) error {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		logDebug("[restart] claude not found: %v\n", err)
-		return fmt.Errorf("claude not found: %w", err)
+		return fail(fmt.Errorf("claude not found: %w", err))
 	}
 
 	var newCmd string
@@ -165,16 +225,56 @@ func DoRestartClaude(sessionName string, resume bool, claudeSessionID string, pa
 		newCmd = "cd " + root + " && " + newCmd
 	}
 
+	// Wrap so a fast-exiting claude leaves a visible rc line in the pane's capture
+	// buffer instead of just letting tmux close the window silently.
+	wrappedCmd := newCmd + `; rc=$?; printf '\n[claude] exited rc=%s\n' "$rc" 1>&2; exit $rc`
+	span.SetAttributes(attribute.String("claude.command", newCmd))
+
 	logDebug("[restart] respawning pane with: %s\n", newCmd)
 
 	// respawn-pane -k kills the existing process and starts a new one in the same pane
 	out, err := exec.Command("tmux", "respawn-pane", "-k", "-t", target,
-		"sh", "-c", newCmd).CombinedOutput()
+		"sh", "-c", wrappedCmd).CombinedOutput()
 	if err != nil {
 		logDebug("[restart] respawn-pane failed: %v (output: %s)\n", err, string(out))
-		return fmt.Errorf("respawn-pane failed: %w", err)
+		span.SetAttributes(attribute.String("tmux.output", string(out)))
+		return fail(fmt.Errorf("respawn-pane failed: %w", err))
 	}
 
+	// Post-respawn sanity check: tmux respawn-pane returns 0 even when the new
+	// command exits in milliseconds. The streaming session has remain-on-exit=on
+	// so a dead pane stays around — we use #{pane_dead} to detect immediate exits
+	// and capture the pane buffer for the span.
+	time.Sleep(1 * time.Second)
+	deadOut, deadErr := exec.Command("tmux", "display-message", "-t", target,
+		"-p", "#{pane_dead}").Output()
+	if deadErr != nil {
+		// If the pane is missing entirely (e.g., remain-on-exit not applied to a
+		// pre-existing session), fall back to a list-windows probe.
+		winCheck, winErr := exec.Command("tmux", "list-windows", "-t", sessionName,
+			"-F", "#{window_name}").Output()
+		windows := strings.Split(strings.TrimSpace(string(winCheck)), "\n")
+		if winErr == nil {
+			span.SetAttributes(attribute.StringSlice("tmux.windows_after", windows))
+		}
+		logDebug("[restart] post-respawn display-message failed: %v (windows: %v)\n", deadErr, windows)
+		return fail(fmt.Errorf("pane %q not found after respawn: %w", windowName, deadErr))
+	}
+	if strings.TrimSpace(string(deadOut)) == "1" {
+		// Capture the last frame of the pane so the failure reason (claude's
+		// error message, "command not found", etc.) lands in the span.
+		paneCap, _ := exec.Command("tmux", "capture-pane", "-p", "-t", target).Output()
+		captured := strings.TrimSpace(string(paneCap))
+		if len(captured) > 2000 {
+			captured = captured[len(captured)-2000:]
+		}
+		span.SetAttributes(attribute.String("pane.last_capture", captured))
+		err := fmt.Errorf("pane %q died within 1s of respawn — claude exited immediately", windowName)
+		logDebug("[restart] %v\npane capture (last 2KB):\n%s\n", err, captured)
+		return fail(err)
+	}
+
+	span.SetAttributes(attribute.Bool("respawn.verified", true))
 	logDebug("[restart] restart complete\n")
 	return nil
 }
@@ -485,6 +585,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		status.Mu.Lock()
 		status.ServerHost = serverHost
 		status.BroadcastID = broadcastID
+		status.RestartClaude = DoRestartClaude
 		status.Mu.Unlock()
 
 		session.CleanStaleSessions()
@@ -611,6 +712,10 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 			exec.Command("tmux", "set-environment", "-t", sessionName, "STAGE_DIR", os.Getenv("STAGE_DIR")).Run()
 		}
 		exec.Command("tmux", "set-option", "-t", sessionName, "window-size", "largest").Run()
+		// Keep dead panes around so we can see Claude's exit output instead of the
+		// window vanishing and ttyd falling back to the lobby fkeybar. The post-respawn
+		// check in DoRestartClaude uses #{pane_dead} to detect immediate exits.
+		exec.Command("tmux", "set-option", "-t", sessionName, "remain-on-exit", "on").Run()
 		exec.Command("tmux", "set-option", "-t", sessionName, "status", "on").Run()
 		// Subtle status bar — terminal default bg, brand red dot for LIVE, readable gray for the rest.
 		// Using 256-color codes instead of hex so it renders on terminals without truecolor.

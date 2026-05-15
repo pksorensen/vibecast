@@ -95,6 +95,10 @@ type SharedStatus struct {
 	// SSE subscriber management
 	EventSubscribers []chan string
 	EventSubMu       sync.Mutex
+	// Callback wired by the stream package at startup to break the broadcast→stream
+	// circular import. Used by broadcast's auth-recovery flow to respawn Claude after
+	// OAuth onboarding consumed the initial prompt. May be nil before stream init.
+	RestartClaude func(sessionName string, resume bool, claudeSessionID string, paneId ...string) error
 }
 
 // Subscribe creates a new SSE event channel for a client.

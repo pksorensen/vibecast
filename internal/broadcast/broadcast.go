@@ -26,6 +26,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -282,11 +283,113 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 		snapTmuxTarget := "vibecast-" + sessionID + ":" + paneId
 		snapshotURL := fmt.Sprintf("%s://%s/_relay/snapshot", snapSchemeBase, serverHost)
 
+		// Track capture-pane failures so we surface them once as a span event
+		// instead of N times in the log. When the failure persists, do a
+		// list-windows probe — that's how we catch a vanished Claude pane.
+		captureFailures := 0
+		paneLostReported := false
+		// Track pane death (remain-on-exit keeps the pane around as #{pane_dead}=1).
+		// First transition alive→dead emits an error span with the final pane buffer.
+		paneDeathReported := false
+
+		probePaneAlive := func() (alive bool, dead bool, captured string) {
+			out, err := tmuxCmd("display-message", "-t", snapTmuxTarget,
+				"-p", "#{pane_dead}").Output()
+			if err != nil {
+				return false, false, "" // pane missing entirely
+			}
+			isDead := strings.TrimSpace(string(out)) == "1"
+			if isDead {
+				cap, _ := tmuxCmd("capture-pane", "-p", "-t", snapTmuxTarget).Output()
+				s := strings.TrimSpace(string(cap))
+				if len(s) > 2000 {
+					s = s[len(s)-2000:]
+				}
+				return false, true, s
+			}
+			return true, false, ""
+		}
+
+		reportPaneDeath := func(reason string, captured string) {
+			if paneDeathReported {
+				return
+			}
+			paneDeathReported = true
+			_, span := telemetry.Tracer().Start(context.Background(), "vibecast.pane.died",
+				trace.WithAttributes(
+					attribute.String("session.id", sessionID),
+					attribute.String("pane.id", paneId),
+					attribute.String("tmux.target", snapTmuxTarget),
+					attribute.String("reason", reason),
+					attribute.String("pane.last_capture", captured),
+				))
+			err := fmt.Errorf("pane %q in vibecast-%s died: %s", paneId, sessionID, reason)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.End()
+			fmt.Fprintf(os.Stderr, "[pane-died] sessionId=%s paneId=%s reason=%s\n", sessionID, paneId, reason)
+		}
+
 		postSnapshot := func() {
+			// Lightweight liveness probe before capture so we catch
+			// "pane alive in tmux but its child process exited" — that's
+			// the failure that lets ttyd fall back to the lobby fkeybar.
+			if !paneDeathReported {
+				if _, isDead, captured := probePaneAlive(); isDead {
+					reportPaneDeath("pane_dead=1", captured)
+				}
+			}
+
 			out, err := tmuxCmd("capture-pane", "-p", "-e", "-t", snapTmuxTarget).Output()
 			if err != nil {
-				logDebug("[broadcast] capture-pane error: %v\n", err)
+				captureFailures++
+				logDebug("[broadcast] capture-pane error: %v (#%d)\n", err, captureFailures)
+				if captureFailures == 1 || (captureFailures%30 == 0 && !paneLostReported) {
+					// Probe the parent tmux session for diagnostics. If the named pane
+					// window is missing, emit a one-shot vibecast.pane.lost error span.
+					winOut, winErr := tmuxCmd("list-windows", "-t", "vibecast-"+sessionID,
+						"-F", "#{window_name}").Output()
+					windows := strings.Split(strings.TrimSpace(string(winOut)), "\n")
+					targetMissing := winErr == nil
+					if targetMissing {
+						targetMissing = true
+						for _, w := range windows {
+							if w == paneId {
+								targetMissing = false
+								break
+							}
+						}
+					}
+					_, span := telemetry.Tracer().Start(context.Background(), "vibecast.capture_pane.failed",
+						trace.WithAttributes(
+							attribute.String("session.id", sessionID),
+							attribute.String("pane.id", paneId),
+							attribute.String("tmux.target", snapTmuxTarget),
+							attribute.String("error", err.Error()),
+							attribute.Int("failure.count", captureFailures),
+							attribute.StringSlice("tmux.windows", windows),
+							attribute.Bool("pane.missing", targetMissing),
+						))
+					if targetMissing && !paneLostReported {
+						paneLostReported = true
+						lostErr := fmt.Errorf("pane %q not present in tmux session vibecast-%s (windows: %v)", paneId, sessionID, windows)
+						span.RecordError(lostErr)
+						span.SetStatus(codes.Error, lostErr.Error())
+						// Also emit a structured log line the runner can tail.
+						fmt.Fprintf(os.Stderr, "[pane-lost] sessionId=%s paneId=%s windows=%s\n", sessionID, paneId, strings.Join(windows, ","))
+					} else {
+						span.RecordError(err)
+						span.SetStatus(codes.Error, err.Error())
+					}
+					span.End()
+				}
 				return
+			}
+			// Reset on successful capture so transient blips don't accumulate forever.
+			if captureFailures > 0 {
+				logDebug("[broadcast] capture-pane recovered after %d failures\n", captureFailures)
+				captureFailures = 0
+				paneLostReported = false
 			}
 			rendered := string(out)
 
