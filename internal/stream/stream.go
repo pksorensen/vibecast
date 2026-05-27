@@ -510,7 +510,11 @@ func SpawnPane(sessionName, sessionID, paneId, name string, status *types.Shared
 			// Kill any stale group session by the same name before creating a new one,
 			// then create a grouped session on the same dedicated tmux socket as the
 			// main vibecast session. Using -S ensures window references work correctly.
-			`tmux %[1]skill-session -t '%[2]s' 2>/dev/null; tmux %[1]snew-session -d -t '%[3]s' -s '%[2]s' && tmux %[1]sselect-window -t '%[2]s:%[4]s' && tmux %[1]sattach -t '%[2]s'`,
+			// Hide the status bar on the group session: viewers don't need it, and
+			// without this they'd see tmux's default green status bar (window list +
+			// pane title + clock) since group sessions have their own session-scoped
+			// options independent of the main vibecast session.
+			`tmux %[1]skill-session -t '%[2]s' 2>/dev/null; tmux %[1]snew-session -d -t '%[3]s' -s '%[2]s' && tmux %[1]sset-option -t '%[2]s' status off && tmux %[1]sselect-window -t '%[2]s:%[4]s' && tmux %[1]sattach -t '%[2]s'`,
 			socketFlag, groupSession, sessionName, paneId,
 		),
 	)
