@@ -33,6 +33,34 @@ import (
 var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[A-Za-z]|[^[]|][^\x07]*\x07)`)
 var urlRE = regexp.MustCompile(`https?://[^\s\x00-\x1f"'<>\x1b\\]{10,}`)
 
+// isLocalURL returns true for URLs pointing at the loopback interface or
+// other unroutable hosts that aren't useful to broadcast to viewers.
+func isLocalURL(u string) bool {
+	lower := strings.ToLower(u)
+	// Strip scheme
+	if i := strings.Index(lower, "://"); i >= 0 {
+		lower = lower[i+3:]
+	}
+	// Host ends at first '/', '?', '#', ':' or end
+	end := len(lower)
+	for i := 0; i < len(lower); i++ {
+		c := lower[i]
+		if c == '/' || c == '?' || c == '#' || c == ':' {
+			end = i
+			break
+		}
+	}
+	host := lower[:end]
+	switch host {
+	case "localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1":
+		return true
+	}
+	if strings.HasPrefix(host, "127.") {
+		return true
+	}
+	return false
+}
+
 func classifyURL(u string) string {
 	switch {
 	case strings.Contains(u, "claude.ai") || strings.Contains(u, "auth.anthropic"):
@@ -1052,6 +1080,9 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 					for _, u := range urlRE.FindAllString(clean, -1) {
 						if !seenURLs[u] {
 							seenURLs[u] = true
+							if isLocalURL(u) {
+								continue
+							}
 							ctx := classifyURL(u)
 							go postURLDetected(serverHost, sessionID, u, ctx)
 						}
