@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.23](https://github.com/pksorensen/vibecast/compare/v0.1.22...v0.1.23) (2026-05-28)
+
+
+### Features
+
+* **broadcast, stream, types, util:** enhance error tracking and UUID validation for session management ([0251b82](https://github.com/pksorensen/vibecast/commit/0251b82e24478898a5eeb9ab543eb45a4083c2eb))
+
+
+### Bug Fixes
+
+* **broadcast:** skip localhost URLs in chat fanout ([e4d8661](https://github.com/pksorensen/vibecast/commit/e4d866161c7d470af300c13ea96005c12faafbdb))
+* **stream:** hide tmux status bar on viewer group session ([5672fea](https://github.com/pksorensen/vibecast/commit/5672fea1458e7b600a39292262d28e0e1b3ad2f9))
+
 ## [0.1.22](https://github.com/pksorensen/vibecast/compare/v0.1.21...v0.1.22) (2026-05-06)
 
 
