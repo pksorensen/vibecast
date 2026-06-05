@@ -942,7 +942,15 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 				SubQuestions []subQuestion `json:"subQuestions"`
 			}
 			injectionTarget := "vibecast-" + sessionID + ":" + paneId + ".0"
-			lastInjectedQuestionID := ""
+			// Track every question ID we've already injected, not just the most
+			// recent one. The server's /pending-answer endpoint can cycle back to
+			// an earlier resolved-but-uncleared question (e.g. the terminal-theme
+			// alp_pane after the OAuth onboarding question resolves). A single
+			// "last ID" var only suppresses *consecutive* duplicates, so the stale
+			// theme answer ("2" = Dark mode) gets re-injected and — if it lands on
+			// Claude's "trust this folder?" dialog — selects "2. No" and kills the
+			// session. A set makes each resolved question inject exactly once.
+			injectedQuestionIDs := map[string]bool{}
 			pollURL := fmt.Sprintf("%s://%s/api/lives/sessions/%s/pending-answer",
 				snapSchemeBase, serverHost, sessionID)
 			ticker := time.NewTicker(3 * time.Second)
@@ -986,10 +994,10 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 					}
 					qID := *r.QuestionID
 					answer := *r.Answer
-					if qID == lastInjectedQuestionID {
+					if injectedQuestionIDs[qID] {
 						continue
 					}
-					lastInjectedQuestionID = qID
+					injectedQuestionIDs[qID] = true
 					logDebug("[answer] injecting answer %q for questionId=%s type=%s\n", answer, qID, r.QuestionType)
 
 					injectCtx := context.Background()
@@ -1108,9 +1116,13 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 									attribute.String("session.id", sessionID),
 									attribute.String("allowed_dir", allowedDir),
 								)
-								if allowedDir != "" && strings.Contains(renderedStr, allowedDir) {
+								// Auto-trust if allowedDir is unset (spawn/job-mode default — the
+								// runner owns the workspace) OR if the prompt's path matches the
+								// explicitly allowed dir (in-process mode). Mirrors the snapshot-loop
+								// handler above; the two must agree or they race and one refuses.
+								if allowedDir == "" || strings.Contains(renderedStr, allowedDir) {
 									tmuxCmd("send-keys", "-t", target, "Enter").Run()
-									logDebug("[broadcast] auto-answered workspace trust prompt for %s\n", allowedDir)
+									logDebug("[broadcast] auto-answered workspace trust prompt (allowedDir=%q)\n", allowedDir)
 									span.SetAttributes(attribute.Bool("auto_answered", true))
 									trustAnswered = true
 								} else {
