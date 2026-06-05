@@ -50,6 +50,8 @@ func HandleHookCommand(args []string) {
 		handleHookSession()
 	case "tool":
 		handleHookTool()
+	case "guard":
+		handleHookGuard()
 	case "post-tool":
 		handleHookPostTool()
 	case "subagent-start":
@@ -385,6 +387,98 @@ func handleHookSession() {
 	})
 	os.Stdout.Write(output)
 	os.Exit(0)
+}
+
+// --- PreToolUse process-kill guard ----------------------------------------
+//
+// In a job-mode broadcast container, the agent, the vibecast broadcaster, tmux,
+// and (when the container is reused) other sessions all share one PID namespace
+// and run as the same user. A broad process kill therefore matches far more than
+// the intended target:
+//   - `pkill -f <pattern>` matches by FULL command line. The invoking shell's own
+//     command line contains the pattern (self-kill), AND Claude's process matches
+//     because vibecast launches it with the station system-prompt inline in argv
+//     (so the project name / "Next.js" / "DronePoul" etc. live in Claude's argv).
+//   - `killall <name>` / `pkill <name>` match by process name (node, claude, …).
+//   - `kill -1` / `kill -- -<pgid>` signal whole process groups / everything.
+// Any of these can terminate Claude's own pane mid-run and drop the session back
+// to the lobby. We block them and tell the agent to target a specific PID.
+
+var (
+	reGuardSegSplit = regexp.MustCompile("&&|\\|\\||[;&|\n]")
+	reGuardKillall  = regexp.MustCompile(`(^|\s)killall(\s|$)`)
+	reGuardPkill    = regexp.MustCompile(`(^|\s)pkill(\s|$)`)
+	reGuardPidfile  = regexp.MustCompile(`(^|\s)(-F|--pidfile)(\s|=|$)`)
+	reGuardKill     = regexp.MustCompile(`(^|\s)kill(\s|$)`)
+	reGuardGroupTgt = regexp.MustCompile(`(^|\s)-1(\s|$)|(^|\s)--\s+-\d+`)
+)
+
+// dangerousProcessKill reports whether a Bash command contains a broad,
+// non-targeted process kill, and returns the offending form for agent feedback.
+// Precise kills are allowed: `kill <pid>`, `pkill -F <pidfile>`, and read-only
+// `pgrep` are never flagged.
+func dangerousProcessKill(cmd string) (bool, string) {
+	for _, seg := range reGuardSegSplit.Split(cmd, -1) {
+		switch {
+		case reGuardKillall.MatchString(seg):
+			return true, "killall"
+		case reGuardPkill.MatchString(seg) && !reGuardPidfile.MatchString(seg):
+			return true, "pkill (by name or -f pattern)"
+		case reGuardKill.MatchString(seg) && reGuardGroupTgt.MatchString(seg):
+			return true, "kill on a process group / all processes (-1 / -- -<pgid>)"
+		}
+	}
+	return false, ""
+}
+
+// handleHookGuard is a fast, synchronous PreToolUse guard. It does no network
+// I/O, so it adds negligible latency to every Bash call. Registered as a
+// separate sync hook so it can actually block (the broadcast `hook tool` runs
+// async and cannot).
+func handleHookGuard() {
+	stdinData, _ := io.ReadAll(os.Stdin)
+	var in struct {
+		ToolName  string `json:"tool_name"`
+		ToolInput struct {
+			Command string `json:"command"`
+		} `json:"tool_input"`
+	}
+	if err := json.Unmarshal(stdinData, &in); err != nil {
+		os.Exit(0)
+	}
+	if in.ToolName != "Bash" || in.ToolInput.Command == "" {
+		os.Exit(0)
+	}
+	bad, form := dangerousProcessKill(in.ToolInput.Command)
+	if !bad {
+		os.Exit(0)
+	}
+	reason := fmt.Sprintf(
+		"Blocked: `%s` is a broad process kill, disabled in this broadcast container.\n\n"+
+			"This container shares one PID namespace between your agent, the live broadcaster, and Claude itself. "+
+			"`pkill -f` matches by full command line and `killall`/`pkill <name>` match by process name — both ALSO match THIS Claude process "+
+			"(its command line embeds the project name and system prompt) and the broadcaster, so the kill terminates your own live session.\n\n"+
+			"Target a specific PID instead:\n"+
+			"  • Capture the PID at launch:  mycmd & echo $! > /tmp/mycmd.pid   then   kill \"$(cat /tmp/mycmd.pid)\"\n"+
+			"  • Or kill by recorded pidfile:  pkill -F /tmp/mycmd.pid\n"+
+			"  • For `aspire run` / dev servers: kill the single PID you started, or use the tool's own stop command.\n\n"+
+			"Do NOT use `pkill -f <pattern>`, `pkill <name>`, `killall`, or `kill -1`.",
+		form,
+	)
+	output, _ := json.Marshal(map[string]interface{}{
+		// Legacy schema (matches the in-tree write guard) plus the current
+		// PreToolUse schema, for compatibility across Claude Code versions.
+		"decision": "block",
+		"reason":   reason,
+		"hookSpecificOutput": map[string]interface{}{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "deny",
+			"permissionDecisionReason": reason,
+		},
+	})
+	os.Stdout.Write(output)
+	fmt.Fprintln(os.Stderr, reason)
+	os.Exit(2)
 }
 
 func handleHookTool() {

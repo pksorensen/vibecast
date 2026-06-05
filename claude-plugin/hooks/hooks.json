@@ -26,6 +26,16 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${VIBECAST_BIN:-${CLAUDE_PLUGIN_ROOT}/../vibecast} hook guard",
+            "async": false
+          }
+        ]
+      },
+      {
         "matcher": "",
         "hooks": [
           {
