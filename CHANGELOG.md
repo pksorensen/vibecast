@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.24](https://github.com/pksorensen/vibecast/compare/v0.1.23...v0.1.24) (2026-06-05)
+
+
+### Features
+
+* **hooks:** block broad process-kills that terminate the agent's own session ([8de4f39](https://github.com/pksorensen/vibecast/commit/8de4f39cdc388dbca71796eace9d94ab8a8711f8))
+
+
+### Bug Fixes
+
+* **broadcast:** stop stale answer replay from killing job-mode runs at the trust dialog ([e51049f](https://github.com/pksorensen/vibecast/commit/e51049f90ec286932753e74edc02157cb79bdfe2))
+
 ## [0.1.23](https://github.com/pksorensen/vibecast/compare/v0.1.22...v0.1.23) (2026-05-28)
 
 
