@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.25](https://github.com/pksorensen/vibecast/compare/v0.1.24...v0.1.25) (2026-06-05)
+
+
+### Features
+
+* **stream:** auto-update Claude to latest once per session before first spawn ([8d13491](https://github.com/pksorensen/vibecast/commit/8d134918a7aa7acb4a0a36353532689f584b1b22))
+
 ## [0.1.24](https://github.com/pksorensen/vibecast/compare/v0.1.23...v0.1.24) (2026-06-05)
 
 
