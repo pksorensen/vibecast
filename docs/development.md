@@ -37,6 +37,8 @@ vibecast stop-broadcast     Stop an active broadcast
 | `VIBECAST_DEBUG` | (off) | Enable debug logging to stderr |
 | `VIBECAST_APPEND_SYSTEM_PROMPT` | (none) | Append text to Claude's system prompt |
 | `VIBECAST_EXTRA_PLUGINS` | (none) | Colon-separated extra Claude plugin dirs |
+| `CLAUDE_AUTO_UPDATE_DISABLED` | (off) | Skip the once-per-session `claude update` run before the first spawn |
+| `CLAUDE_VERSION` | (latest) | Pin Claude to an exact version (`claude install <ver>`); overrides the auto-update |
 | `VIBECAST_AUTO_APPROVE_IMAGES` | (off) | Skip image approval (headless/runner mode) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | (none) | OpenTelemetry trace endpoint |
 | `OTEL_SERVICE_NAME` | `vibecast-cli` | Service name for traces |

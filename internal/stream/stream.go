@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -159,6 +160,85 @@ func claudeSessionIDFlag(sessionID string) string {
 	return " --session-id " + sessionID
 }
 
+// claudeUpdateOnce guarantees the update/pin runs at most once per vibecast
+// process. A vibecast process serves a single broadcast session (one assembly
+// line), so this freezes the Claude version for the whole line — every station
+// and restart in the run uses the same binary, instead of drifting if a release
+// lands mid-line.
+var claudeUpdateOnce sync.Once
+
+// claudeAutoUpdateDisabled reports whether the operator opted out of the
+// auto-update-to-latest behavior via CLAUDE_AUTO_UPDATE_DISABLED.
+func claudeAutoUpdateDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CLAUDE_AUTO_UPDATE_DISABLED"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// ensureClaudeUpToDate keeps the agent runtime current before the first Claude
+// spawn of a session. It is fail-open by design: any error (no network, a
+// read-only global install, a slow registry) is logged and swallowed so a stale
+// binary never turns into a failed broadcast.
+//
+// Behavior:
+//   - CLAUDE_VERSION=x.y.z   → pin: install that exact version (`claude install x.y.z`).
+//   - CLAUDE_AUTO_UPDATE_DISABLED=1 → skip entirely, use whatever is installed.
+//   - otherwise (default)    → update to latest stable (`claude update`).
+//
+// Called from both spawn paths (SpawnPane and DoRestartClaude) but guarded by a
+// sync.Once, so it actually runs only once per process.
+func ensureClaudeUpToDate(claudePath string) {
+	claudeUpdateOnce.Do(func() {
+		pinVersion := strings.TrimSpace(os.Getenv("CLAUDE_VERSION"))
+
+		// An explicit pin always wins, even if auto-update is "disabled" — the
+		// operator asked for a specific version, honor it.
+		if pinVersion == "" && claudeAutoUpdateDisabled() {
+			logDebug("[claude-update] skipped: CLAUDE_AUTO_UPDATE_DISABLED set\n")
+			return
+		}
+
+		var args []string
+		mode := "update"
+		if pinVersion != "" {
+			args = []string{"install", pinVersion}
+			mode = "pin"
+		} else {
+			args = []string{"update"}
+		}
+
+		ctx, span := telemetry.Tracer().Start(context.Background(), "vibecast.claude.autoupdate",
+			trace.WithAttributes(
+				attribute.String("claude.update.mode", mode),
+				attribute.String("claude.update.pin_version", pinVersion),
+			))
+		defer span.End()
+
+		// Bound the work so a hung registry can't stall the first spawn forever.
+		runCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		defer cancel()
+
+		logDebug("[claude-update] running: claude %s\n", strings.Join(args, " "))
+		out, err := exec.CommandContext(runCtx, claudePath, args...).CombinedOutput()
+		trimmed := strings.TrimSpace(string(out))
+		if len(trimmed) > 2000 {
+			trimmed = trimmed[len(trimmed)-2000:]
+		}
+		span.SetAttributes(attribute.String("claude.update.output", trimmed))
+		if err != nil {
+			// Fail-open: log and continue with the installed binary.
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			logDebug("[claude-update] non-fatal failure (continuing with installed claude): %v\noutput:\n%s\n", err, trimmed)
+			return
+		}
+		span.SetAttributes(attribute.Bool("claude.update.ok", true))
+		logDebug("[claude-update] done (%s)\n", mode)
+	})
+}
+
 func buildClaudeCommand(claudePath string, sessionID string) string {
 	cmd := claudePath + " --dangerously-skip-permissions"
 	cmd += buildPluginFlags()
@@ -212,6 +292,7 @@ func DoRestartClaude(sessionName string, resume bool, claudeSessionID string, pa
 		logDebug("[restart] claude not found: %v\n", err)
 		return fail(fmt.Errorf("claude not found: %w", err))
 	}
+	ensureClaudeUpToDate(claudePath)
 
 	var newCmd string
 	if resume && claudeSessionID != "" {
@@ -451,10 +532,13 @@ func SpawnPane(sessionName, sessionID, paneId, name string, status *types.Shared
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		windowCmd = "echo 'Welcome to Agentic Live! Claude Code not found - using bash.' && exec bash"
-	} else if claudeResumeID != "" {
-		windowCmd = buildClaudeResumeCommand(claudePath, claudeResumeID)
 	} else {
-		windowCmd = buildClaudeCommand(claudePath, claudeSessionID)
+		ensureClaudeUpToDate(claudePath)
+		if claudeResumeID != "" {
+			windowCmd = buildClaudeResumeCommand(claudePath, claudeResumeID)
+		} else {
+			windowCmd = buildClaudeCommand(claudePath, claudeSessionID)
+		}
 	}
 
 	// cd to the job work dir (or git root if no isolation env var is set)

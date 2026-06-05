@@ -58,7 +58,15 @@ Runner (pks-cli)
 | `VIBECAST_APPEND_SYSTEM_PROMPT` | Station-level system prompt appended to Claude's context |
 | `VIBECAST_EXTRA_PLUGINS` | Additional Claude plugin directories |
 | `VIBECAST_AUTO_APPROVE_IMAGES` | Skip image approval dialog (headless stations) |
+| `CLAUDE_AUTO_UPDATE_DISABLED` | Opt out of the default update-to-latest run before the first spawn |
+| `CLAUDE_VERSION` | Pin every station in the line to an exact Claude version (overrides auto-update) |
 | `INITIAL_PROMPT` | The task description injected as the first user message |
+
+> **Claude version is an operator concern, not line config.** Before the first
+> spawn of a session, vibecast runs `claude update` once (frozen for the whole
+> line so stations don't drift if a release lands mid-run). It is fail-open — a
+> failed update never blocks the broadcast. Set `CLAUDE_VERSION` to pin a known
+> build, or `CLAUDE_AUTO_UPDATE_DISABLED=1` to use whatever the image ships.
 
 ## Broadcast aggregation across stations
 
