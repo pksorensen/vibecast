@@ -160,6 +160,45 @@ func claudeSessionIDFlag(sessionID string) string {
 	return " --session-id " + sessionID
 }
 
+// validModelTiers are the model family aliases vibecast knows how to map to `claude --model`.
+// They double as valid --model aliases, so the mapping is identity for known tiers.
+var validModelTiers = map[string]bool{"haiku": true, "sonnet": true, "opus": true}
+
+// validEfforts are the effort levels Claude Code accepts (claude --effort <level>).
+var validEfforts = map[string]bool{"low": true, "medium": true, "high": true, "xhigh": true, "max": true}
+
+// buildModelFlag maps the per-station model config to a `claude --model` flag. vibecast owns
+// this mapping (operator responsibility): a specific model id (VIBECAST_CLAUDE_MODEL) wins when
+// set — passed through for the running provider to honor or reject — otherwise the family tier
+// (VIBECAST_CLAUDE_MODEL_TIER) is mapped to its alias. Unknown/empty → no flag (Claude default).
+func buildModelFlag() string {
+	if model := strings.TrimSpace(os.Getenv("VIBECAST_CLAUDE_MODEL")); model != "" {
+		escaped := strings.ReplaceAll(model, "'", "'\"'\"'")
+		return " --model '" + escaped + "'"
+	}
+	if tier := strings.ToLower(strings.TrimSpace(os.Getenv("VIBECAST_CLAUDE_MODEL_TIER"))); tier != "" {
+		if validModelTiers[tier] {
+			return " --model " + tier
+		}
+		logDebug("[claude-cmd] dropping VIBECAST_CLAUDE_MODEL_TIER=%q: unknown tier\n", tier)
+	}
+	return ""
+}
+
+// buildEffortFlag maps VIBECAST_CLAUDE_EFFORT to `claude --effort <level>`. An unknown value is
+// dropped (Claude would warn and fall back to default anyway); empty → no flag.
+func buildEffortFlag() string {
+	effort := strings.ToLower(strings.TrimSpace(os.Getenv("VIBECAST_CLAUDE_EFFORT")))
+	if effort == "" {
+		return ""
+	}
+	if !validEfforts[effort] {
+		logDebug("[claude-cmd] dropping VIBECAST_CLAUDE_EFFORT=%q: not in low|medium|high|xhigh|max\n", effort)
+		return ""
+	}
+	return " --effort " + effort
+}
+
 // claudeUpdateOnce guarantees the update/pin runs at most once per vibecast
 // process. A vibecast process serves a single broadcast session (one assembly
 // line), so this freezes the Claude version for the whole line — every station
@@ -242,6 +281,8 @@ func ensureClaudeUpToDate(claudePath string) {
 func buildClaudeCommand(claudePath string, sessionID string) string {
 	cmd := claudePath + " --dangerously-skip-permissions"
 	cmd += buildPluginFlags()
+	cmd += buildModelFlag()
+	cmd += buildEffortFlag()
 	cmd += buildAppendSystemPromptFlag()
 	cmd += buildInitialPromptArg()
 	cmd += claudeSessionIDFlag(sessionID)
@@ -250,15 +291,17 @@ func buildClaudeCommand(claudePath string, sessionID string) string {
 
 func buildClaudeResumeCommand(claudePath string, sessionID string) string {
 	pluginFlags := buildPluginFlags()
+	modelFlag := buildModelFlag()
+	effortFlag := buildEffortFlag()
 	promptFlag := buildAppendSystemPromptFlag()
 	initialPrompt := buildInitialPromptArg()
 	if sessionID != "" && util.IsUUIDv4(sessionID) {
-		return claudePath + " --dangerously-skip-permissions" + pluginFlags + promptFlag + " --resume " + sessionID + initialPrompt
+		return claudePath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + promptFlag + " --resume " + sessionID + initialPrompt
 	}
 	if sessionID != "" {
 		logDebug("[claude-cmd] dropping --resume %q: not a UUIDv4, falling back to --continue\n", sessionID)
 	}
-	return claudePath + " --dangerously-skip-permissions" + pluginFlags + promptFlag + " --continue" + initialPrompt
+	return claudePath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + promptFlag + " --continue" + initialPrompt
 }
 
 // DoRestartClaude performs the actual restart logic.
