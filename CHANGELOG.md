@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.27](https://github.com/pksorensen/vibecast/compare/v0.1.26...v0.1.27) (2026-06-06)
+
+
+### Features
+
+* **hooks:** emit assistant_response per text block incrementally ([#8](https://github.com/pksorensen/vibecast/issues/8)) ([61d2acf](https://github.com/pksorensen/vibecast/commit/61d2acff79252138c3374156e45af4b6938bfc78))
+
 ## [0.1.26](https://github.com/pksorensen/vibecast/compare/v0.1.25...v0.1.26) (2026-06-06)
 
 
