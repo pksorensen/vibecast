@@ -179,6 +179,84 @@ func readTranscriptIncrement(streamID, transcriptPath string) []map[string]inter
 	return lines
 }
 
+// usageSubset pulls the token-usage fields we forward from a transcript message.
+func usageSubset(usage map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	for _, k := range []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"} {
+		if v, ok := usage[k].(float64); ok && v > 0 {
+			out[k] = int(v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// postAssistantTextBlocks emits one `assistant_response` per assistant text block in
+// the given transcript increment. Claude Code only fires a Stop hook (final text) on a
+// clean exit, so without this the activity feed loses all mid-run narration ("Now let
+// me post…"). Each transcript line lands in exactly one increment (the cursor advances
+// on read), so emitting wherever an increment is consumed yields each block exactly once.
+func postAssistantTextBlocks(sf *types.SessionFile, lines []map[string]interface{}) {
+	for _, line := range lines {
+		if sc, ok := line["isSidechain"].(bool); ok && sc {
+			continue // subagent internal turns stay out of the main thread
+		}
+		if t, _ := line["type"].(string); t != "assistant" {
+			continue
+		}
+		msg, ok := line["message"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		content, ok := msg["content"].([]interface{})
+		if !ok {
+			continue
+		}
+		var usage map[string]interface{}
+		if u, ok := msg["usage"].(map[string]interface{}); ok {
+			usage = usageSubset(u)
+		}
+		for _, block := range content {
+			b, ok := block.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if b["type"] != "text" {
+				continue
+			}
+			text, ok := b["text"].(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				continue
+			}
+			p := map[string]interface{}{
+				"sessionId": sf.SessionID,
+				"type":      "metadata",
+				"subtype":   "assistant_response",
+				"text":      text,
+				"timestamp": time.Now().Unix(),
+			}
+			if usage != nil {
+				p["usage"] = usage
+			}
+			payload, _ := json.Marshal(p)
+			HookPostMetadata(sf, payload)
+		}
+	}
+}
+
+// readIncrementWithText reads the next transcript increment AND streams any assistant
+// text blocks it contains as `assistant_response` metadata. Callers use the returned
+// lines exactly as before (usage extraction, transcript persistence).
+func readIncrementWithText(sf *types.SessionFile, transcriptPath string) []map[string]interface{} {
+	lines := readTranscriptIncrement(sf.SessionID, transcriptPath)
+	if len(lines) > 0 {
+		postAssistantTextBlocks(sf, lines)
+	}
+	return lines
+}
+
 func readFirstUserPrompt(transcriptPath string) string {
 	if transcriptPath == "" {
 		return ""
@@ -331,7 +409,7 @@ func handleHookPrompt() {
 		"timestamp": time.Now().Unix(),
 	}
 
-	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
+	if tl := readIncrementWithText(sf, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 		if usage := extractUsageFromTranscript(tl); usage != nil {
 			p["usage"] = usage
@@ -368,7 +446,7 @@ func handleHookSession() {
 		p["sessionSummary"] = summary
 	}
 
-	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
+	if tl := readIncrementWithText(sf, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 	}
 
@@ -574,7 +652,7 @@ func handleHookTool() {
 		"timestamp":       time.Now().Unix(),
 	}
 
-	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
+	if tl := readIncrementWithText(sf, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 	}
 
@@ -618,7 +696,7 @@ func handleHookPostTool() {
 		json.Unmarshal(hookInput.ToolInput, &toolInput)
 	}
 
-	transcriptLines := readTranscriptIncrement(sf.SessionID, transcriptPath)
+	transcriptLines := readIncrementWithText(sf, transcriptPath)
 	usage := extractUsageFromTranscript(transcriptLines)
 
 	p := map[string]interface{}{
@@ -690,7 +768,7 @@ func handleHookSubagentStart() {
 		"timestamp":      time.Now().Unix(),
 	}
 
-	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
+	if tl := readIncrementWithText(sf, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 	}
 
@@ -721,7 +799,7 @@ func handleHookSubagentStop() {
 		os.Exit(0)
 	}
 
-	transcriptLines := readTranscriptIncrement(sf.SessionID, transcriptPath)
+	transcriptLines := readIncrementWithText(sf, transcriptPath)
 	agentTranscriptLines := readTranscriptIncrement(sf.SessionID, hookInput.AgentTranscriptPath)
 	agentPrompt := readFirstUserPrompt(hookInput.AgentTranscriptPath)
 
@@ -1151,7 +1229,7 @@ func handleHookPreCompact() {
 	if hookInput.CustomInstructions != "" {
 		p["customInstructions"] = hookInput.CustomInstructions
 	}
-	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
+	if tl := readIncrementWithText(sf, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 	}
 
@@ -1189,7 +1267,7 @@ func handleHookPostCompact() {
 		}
 		p["summary"] = summary
 	}
-	if tl := readTranscriptIncrement(sf.SessionID, transcriptPath); len(tl) > 0 {
+	if tl := readIncrementWithText(sf, transcriptPath); len(tl) > 0 {
 		p["transcriptLines"] = tl
 	}
 
