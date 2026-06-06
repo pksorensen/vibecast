@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.26](https://github.com/pksorensen/vibecast/compare/v0.1.25...v0.1.26) (2026-06-06)
+
+
+### Features
+
+* **stream:** add model and effort flag builders with tests ([9ad6c29](https://github.com/pksorensen/vibecast/commit/9ad6c29c8d4d3d94cd8ad409faf06b60898b1520))
+
 ## [0.1.25](https://github.com/pksorensen/vibecast/compare/v0.1.24...v0.1.25) (2026-06-05)
 
 
