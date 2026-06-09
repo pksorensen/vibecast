@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.28](https://github.com/pksorensen/vibecast/compare/v0.1.27...v0.1.28) (2026-06-09)
+
+
+### Features
+
+* **hooks:** incremental assistant_response + model/effort flag builders ([5706522](https://github.com/pksorensen/vibecast/commit/5706522678a37331d66ed8f8caab0b8d761a09aa))
+
 ## [0.1.27](https://github.com/pksorensen/vibecast/compare/v0.1.26...v0.1.27) (2026-06-06)
 
 
