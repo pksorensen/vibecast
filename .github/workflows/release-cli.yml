@@ -80,3 +80,42 @@ jobs:
         run: |
           cd npm/vibecast
           npm publish --access public --provenance
+
+      # Publish convention-named binaries to the agentics.dk release store so
+      #   curl -fsSL https://agentics.dk/install/vibecast.sh | bash
+      # works (GitHub OIDC trusted publishing — no PAT; see the
+      # agentics-cli-release skill). No windows target: vibecast needs tmux.
+      #
+      # KNOWN LIMITATION: the npm packages ship claude-plugin/ next to the
+      # binary (PluginDir()); the bare-binary install does not include it yet.
+      # Hook-dependent features require the npm install until claude-plugin is
+      # embedded in the binary.
+      - name: Publish to agentics.dk release store
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          REC="vibecast-${VERSION}"
+          mkdir -p dist
+          cp npm/linux-x64/bin/vibecast     dist/vibecast_linux_amd64
+          cp npm/linux-arm64/bin/vibecast   dist/vibecast_linux_arm64
+          cp npm/darwin-x64/bin/vibecast    dist/vibecast_darwin_amd64
+          cp npm/darwin-arm64/bin/vibecast  dist/vibecast_darwin_arm64
+          ( cd dist && sha256sum vibecast_* > "vibecast_${VERSION}_checksums.txt" )
+          OIDC=$(curl -fsS -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://agentics.dk/releases" | jq -r '.value')
+          [ -n "$OIDC" ] && [ "$OIDC" != "null" ] || { echo "::error::failed to mint OIDC token"; exit 1; }
+          curl -fsS -X POST -H "Authorization: Bearer ${OIDC}" -H "Content-Type: application/json" \
+            -d "{\"component\":\"vibecast\",\"semver\":\"${VERSION}\",\"tagName\":\"${TAG}\"}" \
+            https://agentics.dk/api/releases >/dev/null
+          for f in dist/vibecast_*; do
+            echo "uploading $(basename "$f")"
+            curl -fsS -X PUT -H "Authorization: Bearer ${OIDC}" \
+              --data-binary @"$f" \
+              "https://agentics.dk/api/releases/${REC}/attachments/$(basename "$f")"
+            echo
+          done
+          curl -fsS -X PUT -H "Authorization: Bearer ${OIDC}" \
+            "https://agentics.dk/api/releases/${REC}/publish" >/dev/null
+          echo "published ${REC}"
