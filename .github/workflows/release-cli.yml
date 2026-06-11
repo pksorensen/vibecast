@@ -86,6 +86,9 @@ jobs:
       # works (GitHub OIDC trusted publishing — no PAT; see the
       # agentics-cli-release skill). No windows target: vibecast needs tmux.
       #
+      # NOTE: requires agentics.dk >= www-site 0.1.56 — earlier versions
+      # silently truncated uploads over 10 MiB (Next proxy body cap), which
+      # corrupted the 0.1.29 binaries in the release store.
       # KNOWN LIMITATION: the npm packages ship claude-plugin/ next to the
       # binary (PluginDir()); the bare-binary install does not include it yet.
       # Hook-dependent features require the npm install until claude-plugin is
