@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.30](https://github.com/pksorensen/vibecast/compare/v0.1.29...v0.1.30) (2026-06-11)
+
+
+### Bug Fixes
+
+* re-release so full-size binaries land in the agentics.dk store ([bf78716](https://github.com/pksorensen/vibecast/commit/bf78716890bda257b17960bde1602aa9a58df28d))
+
 ## [0.1.29](https://github.com/pksorensen/vibecast/compare/v0.1.28...v0.1.29) (2026-06-11)
 
 
