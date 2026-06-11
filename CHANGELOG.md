@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.29](https://github.com/pksorensen/vibecast/compare/v0.1.28...v0.1.29) (2026-06-11)
+
+
+### Features
+
+* publish standalone binaries to the agentics.dk release store ([b955a56](https://github.com/pksorensen/vibecast/commit/b955a56191be2e4656b34740c3787107b5d4785a))
+
 ## [0.1.28](https://github.com/pksorensen/vibecast/compare/v0.1.27...v0.1.28) (2026-06-09)
 
 
