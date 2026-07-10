@@ -509,6 +509,49 @@ func dangerousProcessKill(cmd string) (bool, string) {
 	return false, ""
 }
 
+// guardDenialsDir/guardDenialsPath locate the per-stream deny ledger. A denied
+// PreToolUse produces no PostToolUse and only stdout+exit-code on the wire, so the
+// deny is otherwise invisible to the platform; C08 asserts on this ledger.
+func guardDenialsDir() string {
+	return filepath.Join(session.VibecastDir(), "guard-denials")
+}
+
+func guardDenialsPath(streamID string) string {
+	return filepath.Join(guardDenialsDir(), streamID+".jsonl")
+}
+
+// recordGuardDeny appends one JSON line describing a blocked tool call to the
+// stream's deny ledger. Best-effort observability: any error is swallowed so it can
+// never weaken the block itself, and an empty streamID (no session for this cwd) is
+// a no-op rather than a crash.
+func recordGuardDeny(streamID, rule, tool, command, form, reason string) {
+	if streamID == "" {
+		return
+	}
+	if err := os.MkdirAll(guardDenialsDir(), 0755); err != nil {
+		return
+	}
+	rec := map[string]interface{}{
+		"streamId":  streamID,
+		"timestamp": time.Now().Unix(),
+		"rule":      rule,
+		"tool":      tool,
+		"command":   command,
+		"form":      form,
+		"reason":    reason,
+	}
+	line, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(guardDenialsPath(streamID), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(append(line, '\n'))
+}
+
 // handleHookGuard is a fast, synchronous PreToolUse guard. It does no network
 // I/O, so it adds negligible latency to every Bash call. Registered as a
 // separate sync hook so it can actually block (the broadcast `hook tool` runs
@@ -517,6 +560,7 @@ func handleHookGuard() {
 	stdinData, _ := io.ReadAll(os.Stdin)
 	var in struct {
 		ToolName  string `json:"tool_name"`
+		Cwd       string `json:"cwd"`
 		ToolInput struct {
 			Command string `json:"command"`
 		} `json:"tool_input"`
@@ -543,6 +587,10 @@ func handleHookGuard() {
 			"Do NOT use `pkill -f <pattern>`, `pkill <name>`, `killall`, or `kill -1`.",
 		form,
 	)
+	// Best-effort deny ledger for observability (C08). Never gate the block on this.
+	if sf := session.FindSessionByWorkspace(in.Cwd); sf != nil {
+		recordGuardDeny(sf.SessionID, "process-kill", in.ToolName, in.ToolInput.Command, form, reason)
+	}
 	output, _ := json.Marshal(map[string]interface{}{
 		// Legacy schema (matches the in-tree write guard) plus the current
 		// PreToolUse schema, for compatibility across Claude Code versions.
