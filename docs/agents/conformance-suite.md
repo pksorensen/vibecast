@@ -124,9 +124,9 @@ Mode validity: R = real, M = pi mockmodel.
 | C06 | turn-complete | lifecycle | R M | after C03's reply → a turn-end signal is observed (Stop-derived final `assistant_response` event; its `text` field may legitimately be empty if a streamed `assistant_response` already carried the reply — assert nonce ∈ any assistant_response text AND the final event's arrival) |
 | C07 | completion-conclusion | vibecast_tools | R | job-mode; prompt instructs calling the stop tool with conclusion=success → session-event `end` with `conclusion:"success"` + message; identical shape across agents (the ALP Runner contract) |
 | C08 | guard-denies | guard.deny | R M | a sentinel process (`conformance-sentinel` in its cmdline) runs; prompt = "run `pkill -f conformance-sentinel`; if it fails, do NOT try any other way to stop it — report the error instead" → deny record exists in `$VIBECAST_HOME/guard-denials/<streamId>.jsonl` (adapter-spec §4) AND the turn completes. Sentinel death with a recorded deny = prompt-compliance flake → retry once (the guard demonstrably worked; models can legitimately kill via allowed `pgrep`+`kill <pid>`) |
-| C09a | resume: tmux-alive | session.resume | R M | SIGKILL **vibecast only** (agent + tmux keep running) → relaunch `vibecast --resume <streamId>` (same VIBECAST_HOME/TMUX_TMPDIR) → broadcaster WS reconnects and subsequent agent events flow; no agent relaunch |
-| C09b | resume: local-file | session.resume | R | stop vibecast, kill the agent pane AND `tmux kill-session`, keep VIBECAST_HOME → relaunch with `--resume <streamId>` → agent relaunched with the adapter's resume mechanism; `session_start` arrives; identity assertion is **per-adapter** (see below); real mode: agent answers "what nonce did you write earlier?" correctly |
-| C09c | resume: server-fetch | session.resume | R | as C09b but VIBECAST_HOME sessions wiped → vibecast recovers the id from the mock's session-event start response (`claudeSessionId`, stateful mock) → same assertions as C09b |
+| **C09** | **resume-relaunch** (Runner contract) | session.resume | R | **IMPLEMENTED** (`C09_resume_relaunch`, green 2026-07-10). Phase 1 brings the agent live with one real turn (so a resumable transcript exists) and the harness harvests the reported+recorded agent session id; the whole run is torn down (agent + tmux + vibecast) keeping VIBECAST_HOME/workspace/config-seed; phase 2 relaunches vibecast fresh with `VIBECAST_RESUME_SESSION_ID=<harvested id>` + `SESSION_ID=<streamId>` and POST `/start-stream` → StartStream → SpawnPane relaunches the agent with `claude --resume <id>` (probe: agent pane `#{pane_start_command}`), and a **fresh `session_start` beyond phase 1's** proves the agent re-registered. This is the Runner's real recovery path (`VIBECAST_RESUME_SESSION_ID` env — see agentics-store.ts), not the interactive `vibecast --resume <streamId>` flag. Identity assertion is **per-adapter** (see below) |
+| ~~C09a~~ | resume: tmux-alive reattach | session.resume | — | **DEFERRED (not in CI)**: `stream.ResumeStream` (per-pane ttyd reattach, no agent relaunch) is reachable only via the splash-screen Enter keypress in the TUI, and the headless program is built `tea.WithInput(nil)` — there is **no control-socket trigger**. Driving it would need a new `/resume-stream` control route (a product addition). The Runner also never uses this path (it always relaunches the agent via `VIBECAST_RESUME_SESSION_ID`), so it is out of v1 scope. Tracked as a product gap below |
+| ~~C09c~~ | resume: server-fetch | session.resume | — | **DEFERRED (not in CI)**: recovering the agent id from the session-event start response (`claudeSessionId`) is a `ResumeStream`-only feature — `StartStream` (the headless path) does not parse it. Same unreachability as C09a, and the Runner never wipes the id it passes, so this variant is not part of the production contract |
 | C10 | session-end-reported | — | R M | job-mode session; POST `/stop-broadcast` on the control socket (message + conclusion) → session-event `end` arrives with those fields, no earlier than the ~10s flush grace, after trailing metadata. (Pane-kill does NOT produce `end` — that path is ws-relay's job in production and is out of mockserver scope) |
 | C11 | prompt-injection-tui | — | R M | harness-driven `tmux send-keys` of a nonce message (v1 validates the agent's REPL submit semantics; vibecast's chat-channel delivery machinery gets C11b later via a mock chat-channel WS) → `prompt` event with the nonce ≤ deadline |
 | C12 | auth-gate-detected | — | R, manual runbook (not CI) | launch with credentials absent/relocated, job mode → `onboarding_external` or `url_detected` with this agent's login classifier ≤ 120s. Also pins each adapter's ClassifyURL patterns empirically (codex's are currently assumed, never captured) |
@@ -197,7 +197,7 @@ agent=codex   version=0.142.5   mode=real
   C02 session-identity        PASS   8.9s   (discover)
   C05 tool-events             PASS  41.2s
   C08 guard-denies            PASS  33.0s
-  C09b resume: local-file     FAIL   —      relaunch cmd missing resume flag
+  C09 resume-relaunch         FAIL   —      relaunch cmd missing resume flag
   subagent_events             DECLARED, UNVERIFIED (no scenario)
   plan_events                 SKIP  (capability not declared)
 ```
@@ -211,6 +211,13 @@ on each agent branch as the "findings report" that merges back to base.
 - C13/C14/C15 (plan, usage, question round-trip) to close the declared-capability gaps.
 - echo-agent mode for the codex/pi wiring styles; claude echo emulator as its own item.
 - C11b: chat-channel WS delivery path through a mock chat endpoint.
+- **C09-reattach + C09-server-fetch** (product gap): a headless `/resume-stream` control
+  route is needed before either can be driven in CI. Today `stream.ResumeStream` (per-pane
+  ttyd reattach without relaunching the agent, and its server-side `claudeSessionId`
+  recovery) is reachable only via the interactive splash Enter keypress; the headless
+  program has `tea.WithInput(nil)`, and `StartStream` neither triggers reattach nor parses
+  `claudeSessionId`. Add the control route → then C09a/C09c become testable. Neither is on
+  the Runner's production path (it always relaunches via `VIBECAST_RESUME_SESSION_ID`).
 - Wire the scenario tier into the release flow (label-gated, like the existing e2e suite).
 - Extend the harness toward the general vibecast e2e loop (viewer WS assertions, ws-relay
   end-on-disconnect, resize storms per docs/terminal-sizing.md).

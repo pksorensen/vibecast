@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -46,7 +47,8 @@ type Session struct {
 	ControlSock  string
 	StderrLog    string // file capturing vibecast's stderr (survives the pane's death)
 
-	ctrl *http.Client
+	seedEnv map[string]string // agent config-home env (CLAUDE_CONFIG_DIR, ...); reused on resume relaunch
+	ctrl    *http.Client
 }
 
 // Stderr returns the full captured vibecast stderr log (empty string if unreadable).
@@ -168,6 +170,7 @@ func Launch(cfg LaunchConfig) (*Session, error) {
 		JobID:        jobID,
 		ControlSock:  filepath.Join(vibecastHome, ".vibecast", "control.sock"),
 		StderrLog:    stderrLog,
+		seedEnv:      seedEnv,
 	}
 	s.ctrl = &http.Client{
 		Timeout: 8 * time.Second,
@@ -271,6 +274,104 @@ func (s *Session) StopBroadcast(message, conclusion string) error {
 // Teardown kills the private tmux server (which terminates vibecast and its panes).
 func (s *Session) Teardown() {
 	_ = exec.Command("tmux", "-S", s.TmuxSock, "kill-server").Run()
+}
+
+// RelaunchForResume simulates the ALP Runner resuming a recycled job. It starts a FRESH
+// vibecast process (new private tmux server + new stderr log) that reuses this session's
+// VIBECAST_HOME, workspace, agent config seed, and stream id (SESSION_ID), and exports
+// VIBECAST_RESUME_SESSION_ID=claudeResumeID so the agent is relaunched against its prior
+// session (claude → `claude --resume <id>`). This mirrors the Runner handing the harvested
+// agent session id to a fresh container on the same credentials volume. The caller must
+// Teardown() the original process first; the returned *Session drives the resumed run and
+// must itself be torn down.
+func (s *Session) RelaunchForResume(claudeResumeID string) (*Session, error) {
+	tmuxSock := filepath.Join(s.cfg.BaseDir, "tmux-resume.sock")
+	stderrLog := filepath.Join(s.cfg.BaseDir, "vibecast-resume.stderr")
+	controlSock := filepath.Join(s.VibecastHome, ".vibecast", "control.sock")
+	// The prior process died via tmux kill-server (SIGHUP → no cleanup ran), leaving its
+	// control socket file behind. Remove it so WaitControlSocket blocks for the NEW listener
+	// rather than returning immediately on a stale path with no one listening. (StartControlServer
+	// also os.Remove()s it before binding, so the relaunch rebinds cleanly regardless.)
+	_ = os.Remove(controlSock)
+
+	env := map[string]string{
+		"AGENTICS_SERVER":             s.cfg.ServerAddr,
+		"AGENTIC_SERVER":              s.cfg.ServerAddr,
+		"VIBECAST_HOME":               s.VibecastHome,
+		"VIBECAST_AGENT":              s.cfg.Agent,
+		"SESSION_ID":                  s.SessionID, // resume the SAME stream (root.go reads SESSION_ID)
+		"VIBECAST_RESUME_SESSION_ID":  claudeResumeID,
+		"CLAUDE_AUTO_UPDATE_DISABLED": "1",
+		"PI_SKIP_VERSION_CHECK":       "1",
+		"VIBECAST_DEBUG":              "1",
+	}
+	if s.cfg.JobMode {
+		env["AGENTICS_JOB_MODE"] = "1"
+	}
+	if s.JobID != "" {
+		env["AGENTICS_JOB_ID"] = s.JobID
+	}
+	for k, v := range s.cfg.ExtraEnv {
+		env[k] = v
+	}
+
+	args := []string{
+		"-S", tmuxSock, "new-session", "-d", "-s", "runner",
+		"-x", "220", "-y", "50", "-c", s.Workspace, "env",
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, k+"="+env[k])
+	}
+	args = append(args, "sh", "-c", `exec "$0" 2>> "$1"`, s.cfg.VibecastBin, stderrLog)
+
+	cmd := exec.Command("tmux", args...)
+	// Reuse the phase-1 agent config seed (CLAUDE_CONFIG_DIR) so the resumed agent stays
+	// pre-trusted AND its prior-session transcript is present for `--resume` to load.
+	cmd.Env = envWithOverrides(os.Environ(), s.seedEnv)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("tmux new-session (resume) failed: %w: %s", err, stderr.String())
+	}
+
+	rs := &Session{
+		cfg:          s.cfg,
+		TmuxSock:     tmuxSock,
+		VibecastHome: s.VibecastHome,
+		Workspace:    s.Workspace,
+		SessionID:    s.SessionID,
+		JobID:        s.JobID,
+		ControlSock:  controlSock,
+		StderrLog:    stderrLog,
+		seedEnv:      s.seedEnv,
+	}
+	rs.ctrl = &http.Client{
+		Timeout: 8 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", rs.ControlSock)
+			},
+		},
+	}
+	return rs, nil
+}
+
+// AgentPaneStartCommand returns the command tmux used to launch the agent's REPL pane
+// (`vibecast-<id>:main.0`) — i.e. the `sh -c '<cd && claude ...>'` string. It reflects the
+// launch invocation regardless of whether the agent process then succeeded, so it is the
+// robust way to assert a resume flag (claude `--resume <id>`) reached the relaunch.
+func (s *Session) AgentPaneStartCommand() string {
+	out, err := exec.Command("tmux", "-S", s.TmuxSock, "display-message", "-p", "-t",
+		s.AgentPaneTarget()+".0", "#{pane_start_command}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // CapturePane returns the rendered contents of a pane in one of vibecast's tmux sessions,

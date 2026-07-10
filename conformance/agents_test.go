@@ -74,6 +74,7 @@ func TestConformance(t *testing.T) {
 			t.Run("C06_turn_complete", func(t *testing.T) { scenarioC06(t, agent) })
 			t.Run("C07_completion_conclusion", func(t *testing.T) { scenarioC07(t, agent) })
 			t.Run("C08_guard_denies", func(t *testing.T) { scenarioC08(t, agent) })
+			t.Run("C09_resume_relaunch", func(t *testing.T) { scenarioC09(t, agent) })
 			t.Run("C10_session_end_reported", func(t *testing.T) { scenarioC10(t, agent) })
 			t.Run("C11_prompt_injection_tui", func(t *testing.T) { scenarioC11(t, agent) })
 		})
@@ -495,6 +496,132 @@ func scenarioC08(t *testing.T, agent string) {
 	t.Logf("guard blocked and recorded the process-kill; turn completed (nonce %s)", nonce)
 }
 
+// scenarioC09 (resume-relaunch): the ALP Runner's crash/timeout recovery contract. When a job
+// is recycled the Runner relaunches vibecast fresh against the SAME stream id and exports
+// VIBECAST_RESUME_SESSION_ID = the agent session id harvested from the prior run, so the agent
+// continues its session instead of starting cold (cmd/root.go → StartStream → SpawnPane →
+// claude --resume <id>). This asserts the full round-trip: run 1 mints an agent session id that
+// vibecast records + publishes; the harness harvests it exactly as the platform would; a fresh
+// relaunch (new tmux server, same VIBECAST_HOME/workspace/config seed, SESSION_ID pinned) reaches
+// live and respawns the agent with a resume command naming that harvested id, and a fresh
+// session_start proves the agent process actually came back up and re-registered.
+//
+// Per-adapter identity: the resume-command shape differs by agent (claude/pi resume by session
+// id, codex by thread) — resumeCommandFragment encodes each. Only the Runner relaunch (agent
+// respawn) is exercised headlessly; vibecast's tmux-alive reattach (stream.ResumeStream) is
+// reachable only via an interactive splash keypress with no control-socket trigger, so it is out
+// of CI scope (see docs/agents/conformance-suite.md roadmap).
+func scenarioC09(t *testing.T, agent string) {
+	// Phase 1: bring the agent live WITH one real turn so a resumable conversation transcript
+	// exists on disk — `claude --resume <id>` errors out on an empty/absent session, and a
+	// recycled job that had done nothing wouldn't be worth resuming anyway. The nonce reply is
+	// just to force a turn; C09 does not assert conversation continuity (that needs asserting on
+	// live model output — out of scope here).
+	nonce := newNonce(t)
+	promptFile := filepath.Join(t.TempDir(), "initial-prompt.txt")
+	body := "Reply with exactly this token on a line by itself: " + nonce +
+		". Do not use any tools and do not say anything else."
+	if err := os.WriteFile(promptFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	sess, mock := bringLive(t, agent, harness.LaunchConfig{
+		PromptShare: true,
+		ShareInfo:   true,
+		ExtraEnv:    map[string]string{"VIBECAST_INITIAL_PROMPT_FILE": promptFile},
+	})
+
+	// Harvest the session id vibecast reports + records — the same id the platform reads back to
+	// hand a resuming Runner.
+	var priorID string
+	waitFor(t, 90*time.Second, "phase-1 session_start with a non-empty agent session id", func() bool {
+		for _, e := range mock.MetadataPostsOfSubtype("session_start") {
+			if e.Decoded["sessionId"] != sess.SessionID {
+				continue
+			}
+			if id, ok := e.Decoded["claudeSessionId"].(string); ok && id != "" {
+				priorID = id
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, 10*time.Second, "phase-1 agent session id recorded in the session file", func() bool {
+		for _, id := range sess.PaneClaudeSessionIDs() {
+			if id == priorID {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Wait for the phase-1 turn to complete so the transcript is durably written before the
+	// recycle — otherwise there is nothing for --resume to load.
+	waitFor(t, 120*time.Second, "phase-1 turn completes (transcript written) before recycle", func() bool {
+		for _, e := range mock.MetadataPostsOfSubtype("assistant_response") {
+			if e.Decoded["sessionId"] == sess.SessionID {
+				return true
+			}
+		}
+		return false
+	})
+	t.Logf("phase 1: agent session id %s (stream %s), turn complete", priorID, sess.SessionID)
+
+	// Snapshot phase-1 session_start count for this stream so phase 2's relaunch is provable as a
+	// genuinely new agent registration (count strictly increases) — agent-agnostic.
+	phase1Starts := 0
+	for _, e := range mock.MetadataPostsOfSubtype("session_start") {
+		if e.Decoded["sessionId"] == sess.SessionID {
+			phase1Starts++
+		}
+	}
+
+	// Recycle: tear the whole run down (agent + tmux + vibecast), keeping VIBECAST_HOME +
+	// workspace + agent config seed — what survives a Runner job recycle on the same volume.
+	sess.Teardown()
+
+	// Phase 2: the Runner relaunches vibecast against the same stream, resuming priorID.
+	rs, err := sess.RelaunchForResume(priorID)
+	if err != nil {
+		t.Fatalf("relaunch for resume: %v", err)
+	}
+	t.Cleanup(func() { rs.Teardown() })
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("RESUME DIAGNOSTICS\n%s\nvibecast resume stderr:\n%s", rs.Diagnostics(), rs.Stderr())
+		}
+	})
+
+	if err := rs.WaitControlSocket(30 * time.Second); err != nil {
+		t.Fatalf("resume control socket: %v", err)
+	}
+	if err := rs.StartStream(); err != nil {
+		t.Fatalf("resume start-stream: %v", err)
+	}
+	if _, err := rs.WaitPhase(30*time.Second, "live"); err != nil {
+		t.Fatalf("resume wait phase live: %v", err)
+	}
+
+	// The agent must be relaunched against the harvested id — the launch command names it.
+	frag := resumeCommandFragment(agent, priorID)
+	waitFor(t, 20*time.Second, "agent pane relaunched with resume command containing "+frag, func() bool {
+		return strings.Contains(rs.AgentPaneStartCommand(), frag)
+	})
+
+	// And the agent process must actually have come back up under resume: a fresh session_start
+	// beyond phase 1's registrations for this stream.
+	waitFor(t, 90*time.Second, "a fresh session_start after resume (agent relaunched + re-registered)", func() bool {
+		n := 0
+		for _, e := range mock.MetadataPostsOfSubtype("session_start") {
+			if e.Decoded["sessionId"] == sess.SessionID {
+				n++
+			}
+		}
+		return n > phase1Starts
+	})
+	t.Logf("resume relaunched the agent with %q and it re-registered (stream %s)", frag, sess.SessionID)
+}
+
 // scenarioC10 (session-end-reported): the operator's clean stop must be reported to the
 // platform. POST /stop-broadcast on the control socket with a completion message and
 // conclusion; after vibecast's ~10s flush grace a session-event `end` must arrive carrying
@@ -630,6 +757,20 @@ func replReadyMarker(agent string) string {
 		return "bypass permissions"
 	default:
 		return ""
+	}
+}
+
+// resumeCommandFragment returns the substring the agent's relaunch command must contain to
+// prove vibecast resumed the harvested session id, per adapter. claude resumes by id
+// (`claude --resume <id>`, buildClaudeResumeCommand); codex/pi add their own forms here when
+// they land (codex resumes a thread, pi a session id).
+func resumeCommandFragment(agent, priorID string) string {
+	switch agent {
+	case "claude":
+		return "--resume " + priorID
+	default:
+		// Same as claude until a divergent adapter overrides it.
+		return "--resume " + priorID
 	}
 }
 
