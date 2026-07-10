@@ -67,6 +67,7 @@ func TestConformance(t *testing.T) {
 		t.Run(agent, func(t *testing.T) {
 			t.Run("C01_launch_registers", func(t *testing.T) { scenarioC01(t, agent) })
 			t.Run("C02_session_identity", func(t *testing.T) { scenarioC02(t, agent) })
+			t.Run("C03_initial_prompt", func(t *testing.T) { scenarioC03(t, agent) })
 		})
 	}
 }
@@ -177,6 +178,50 @@ func scenarioC02(t *testing.T, agent string) {
 		}
 		return false
 	})
+}
+
+// scenarioC03 (initial-prompt-published): the initial job prompt vibecast is handed via
+// VIBECAST_INITIAL_PROMPT_FILE must reach the agent and surface back to the platform. Seed
+// a nonce prompt file, launch, and assert a `prompt` metadata event for this session whose
+// text contains the nonce arrives within the deadline (ordering vs tool_use is advisory —
+// hooks POST asynchronously and can race).
+func scenarioC03(t *testing.T, agent string) {
+	nonce := newNonce(t)
+	promptFile := filepath.Join(t.TempDir(), "initial-prompt.txt")
+	body := "Conformance check " + nonce + ". Reply with one short line acknowledging; do not run any tools."
+	if err := os.WriteFile(promptFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	sess, mock := bringLive(t, agent, harness.LaunchConfig{
+		PromptShare: true,
+		ShareInfo:   true,
+		ExtraEnv:    map[string]string{"VIBECAST_INITIAL_PROMPT_FILE": promptFile},
+	})
+
+	waitFor(t, 90*time.Second, "prompt metadata whose text contains the nonce", func() bool {
+		for _, e := range mock.MetadataPostsOfSubtype("prompt") {
+			if e.Decoded["sessionId"] != sess.SessionID {
+				continue
+			}
+			if txt, ok := e.Decoded["prompt"].(string); ok && strings.Contains(txt, nonce) {
+				return true
+			}
+		}
+		return false
+	})
+	t.Logf("initial prompt surfaced as a prompt event carrying nonce %s", nonce)
+}
+
+// newNonce returns a fresh alphanumeric token unlikely to collide or be altered by masking,
+// for correlating a specific prompt/response through the metadata channel.
+func newNonce(t *testing.T) string {
+	t.Helper()
+	id, err := harness.NewUUIDv4()
+	if err != nil {
+		t.Fatalf("nonce: %v", err)
+	}
+	return "CONFORM" + strings.ReplaceAll(id, "-", "")[:12]
 }
 
 // waitFor polls pred until it is true or the timeout elapses, failing the test with the
