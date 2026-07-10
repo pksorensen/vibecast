@@ -72,6 +72,7 @@ func TestConformance(t *testing.T) {
 			t.Run("C05_tool_events", func(t *testing.T) { scenarioC05(t, agent) })
 			t.Run("C06_turn_complete", func(t *testing.T) { scenarioC06(t, agent) })
 			t.Run("C08_guard_denies", func(t *testing.T) { scenarioC08(t, agent) })
+			t.Run("C11_prompt_injection_tui", func(t *testing.T) { scenarioC11(t, agent) })
 		})
 	}
 }
@@ -381,6 +382,78 @@ func scenarioC08(t *testing.T, agent string) {
 	t.Logf("guard blocked and recorded the process-kill; turn completed (nonce %s)", nonce)
 }
 
+// scenarioC11 (prompt-injection-tui): a prompt typed straight into the agent's REPL — not
+// handed in via VIBECAST_INITIAL_PROMPT_FILE — must submit and surface back to the platform.
+// This validates the agent's interactive submit semantics (the path a live chat-channel
+// message ultimately drives): bring the agent up with NO initial prompt so the REPL sits
+// idle, `tmux send-keys` a nonce line into the agent pane, and assert a `prompt` metadata
+// event for this session carrying the nonce arrives within the deadline.
+func scenarioC11(t *testing.T, agent string) {
+	nonce := newNonce(t)
+
+	sess, mock := bringLive(t, agent, harness.LaunchConfig{
+		PromptShare: true,
+		ShareInfo:   true,
+	})
+
+	// Don't type until the agent process is up (session_start proves the SessionStart hook
+	// fired) — an early send-keys is silently dropped before the TUI captures the terminal.
+	waitFor(t, 90*time.Second, "session_start metadata (agent process up)", func() bool {
+		for _, e := range mock.MetadataPostsOfSubtype("session_start") {
+			if e.Decoded["sessionId"] == sess.SessionID {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Best-effort wait for the idle input box to render (see replReadyMarker). Non-fatal + a
+	// settle so a TUI wording change can't wedge the scenario; keystrokes are PTY-buffered
+	// regardless, so the marker only trims the settle gamble. If it never shows we proceed
+	// anyway and let the prompt assertion be the judge.
+	target := sess.AgentPaneTarget()
+	if marker := replReadyMarker(agent); marker != "" {
+		if !pollUntil(20*time.Second, func() bool {
+			return strings.Contains(sess.CapturePane(target), marker)
+		}) {
+			t.Logf("REPL readiness marker %q not seen in pane capture; proceeding after settle", marker)
+		}
+	}
+	time.Sleep(1 * time.Second)
+
+	msg := "Conformance check " + nonce + ". Reply with one short line acknowledging; do not run any tools."
+	if err := sess.SendKeys(target, msg); err != nil {
+		t.Fatalf("send-keys prompt into %s: %v", target, err)
+	}
+
+	waitFor(t, 90*time.Second, "prompt metadata whose text contains the injected nonce", func() bool {
+		for _, e := range mock.MetadataPostsOfSubtype("prompt") {
+			if e.Decoded["sessionId"] != sess.SessionID {
+				continue
+			}
+			if txt, ok := e.Decoded["prompt"].(string); ok && strings.Contains(txt, nonce) {
+				return true
+			}
+		}
+		return false
+	})
+	t.Logf("send-keys prompt reached the agent REPL and surfaced as a prompt event (nonce %s)", nonce)
+}
+
+// replReadyMarker returns a substring that, once present in the agent's pane capture, means
+// its REPL has drawn and is accepting typed input. Empty means "no known marker for this
+// agent" — the caller falls back to a fixed settle. Claude, always launched with
+// --dangerously-skip-permissions, shows a persistent "bypass permissions" status line once
+// idle. Each new adapter fills in its own marker here.
+func replReadyMarker(agent string) string {
+	switch agent {
+	case "claude":
+		return "bypass permissions"
+	default:
+		return ""
+	}
+}
+
 // isWriteToolName reports whether a raw agent tool name denotes a file-writing tool. Kept
 // permissive so it holds across agents (claude Write/Edit/MultiEdit, others' equivalents).
 func isWriteToolName(name string) bool {
@@ -411,4 +484,18 @@ func waitFor(t *testing.T, timeout time.Duration, what string, pred func() bool)
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("timed out after %s waiting for: %s", timeout, what)
+}
+
+// pollUntil polls pred until it is true or the timeout elapses, returning whether it became
+// true. Unlike waitFor it is non-fatal — for best-effort readiness checks that shouldn't
+// wedge a scenario if the signal never appears.
+func pollUntil(timeout time.Duration, pred func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if pred() {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
 }

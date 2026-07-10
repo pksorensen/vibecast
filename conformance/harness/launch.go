@@ -242,6 +242,28 @@ func (s *Session) CapturePane(session string) string {
 	return string(out)
 }
 
+// AgentPaneTarget is the tmux target of the agent's REPL window (see stream.SpawnPane,
+// which spawns the main pane as `vibecast-<id>:main`). It is where a chat-channel prompt
+// is ultimately typed into the TUI.
+func (s *Session) AgentPaneTarget() string {
+	return "vibecast-" + s.SessionID + ":main"
+}
+
+// SendKeys types text into a tmux target and submits it with Enter, mimicking the
+// prompt-delivery path into the agent REPL. The literal (`-l`) send avoids tmux
+// interpreting the message as key names; the short settle lets the TUI register the
+// text before the Enter so it isn't swallowed by paste-batching.
+func (s *Session) SendKeys(target, text string) error {
+	if err := exec.Command("tmux", "-S", s.TmuxSock, "send-keys", "-t", target, "-l", text).Run(); err != nil {
+		return fmt.Errorf("send-keys text to %s: %w", target, err)
+	}
+	time.Sleep(250 * time.Millisecond)
+	if err := exec.Command("tmux", "-S", s.TmuxSock, "send-keys", "-t", target, "Enter").Run(); err != nil {
+		return fmt.Errorf("send-keys Enter to %s: %w", target, err)
+	}
+	return nil
+}
+
 // tailPaneCapture grabs whatever is on the lobby or streaming pane for error messages.
 func (s *Session) tailPaneCapture() string {
 	if out := s.CapturePane("vibecast-" + s.SessionID); out != "" {
