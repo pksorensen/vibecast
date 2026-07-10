@@ -72,6 +72,7 @@ func TestConformance(t *testing.T) {
 			t.Run("C04_system_prompt_honored", func(t *testing.T) { scenarioC04(t, agent) })
 			t.Run("C05_tool_events", func(t *testing.T) { scenarioC05(t, agent) })
 			t.Run("C06_turn_complete", func(t *testing.T) { scenarioC06(t, agent) })
+			t.Run("C07_completion_conclusion", func(t *testing.T) { scenarioC07(t, agent) })
 			t.Run("C08_guard_denies", func(t *testing.T) { scenarioC08(t, agent) })
 			t.Run("C10_session_end_reported", func(t *testing.T) { scenarioC10(t, agent) })
 			t.Run("C11_prompt_injection_tui", func(t *testing.T) { scenarioC11(t, agent) })
@@ -375,6 +376,59 @@ func scenarioC06(t *testing.T, agent string) {
 		return false
 	})
 	t.Logf("reply surfaced and turn completed for nonce %s", nonce)
+}
+
+// scenarioC07 (completion-conclusion): the ALP Runner contract. In job mode the agent itself
+// must finish a job by calling vibecast's stop tool with a conclusion — this is how a station
+// reports success/failure back to the assembly line. It exercises a DIFFERENT path than C10:
+// C10 is the operator's out-of-band /stop-broadcast on the control socket; C07 is the agent
+// invoking the `stop_broadcast` MCP tool (registered via the vibecast claude-plugin's .mcp.json
+// → `vibecast mcp serve`), which resolves its own gates, then posts the same session-event
+// `end`. The nonce rides in the completion message so the assertion is unambiguous.
+//
+// Job mode (AGENTICS_JOB_MODE=1 + AGENTICS_JOB_ID) is what makes the stop tool the contract:
+// the job-mode Stop hook blocks the agent from exiting until stop_broadcast has been called, so
+// even if the model forgot the explicit instruction the conclusion still gets reported. The
+// harness workspace is not a git repo and AGENTICS_AUTO_GIT is unset, so the tool's auto-git /
+// uncommitted-changes gates are inert and gitCommit/gitBranch degrade to empty.
+func scenarioC07(t *testing.T, agent string) {
+	nonce := newNonce(t)
+	promptFile := filepath.Join(t.TempDir(), "initial-prompt.txt")
+	body := "The job is complete. Call the stop_broadcast tool now with conclusion set to " +
+		"\"success\" and message set to a one-line summary that includes the token " + nonce +
+		". Do not use any other tools and do not do anything else."
+	if err := os.WriteFile(promptFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	sess, mock := bringLive(t, agent, harness.LaunchConfig{
+		JobMode:     true,
+		JobID:       "test-job-" + nonce,
+		PromptShare: true,
+		ShareInfo:   true,
+		ExtraEnv:    map[string]string{"VIBECAST_INITIAL_PROMPT_FILE": promptFile},
+	})
+
+	waitFor(t, 150*time.Second, "session-event end with conclusion=success carrying our message + jobId", func() bool {
+		for _, e := range mock.SessionEvents() {
+			if e.Decoded["event"] != "end" || e.Decoded["sessionId"] != sess.SessionID {
+				continue
+			}
+			if e.Decoded["conclusion"] != "success" {
+				continue
+			}
+			msgOK := false
+			if m, ok := e.Decoded["message"].(string); ok && strings.Contains(m, nonce) {
+				msgOK = true
+			}
+			if msgOK && e.Decoded["jobId"] == sess.JobID {
+				return true
+			}
+		}
+		return false
+	})
+	t.Logf("agent called stop_broadcast; station reported conclusion=success jobId=%s (nonce %s)",
+		sess.JobID, nonce)
 }
 
 // scenarioC08 (guard-denies): a broad process-kill must be blocked by the PreToolUse
