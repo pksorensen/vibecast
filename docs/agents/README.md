@@ -44,17 +44,19 @@ concentrated in the control plane, behind one interface, selected by `VIBECAST_A
 ## Key findings that shaped the design (2026-07-10)
 
 1. **Codex now has a Claude-style hooks system** (feature `hooks` = stable + enabled in
-   0.142.5): SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest,
-   Stop, SubagentStart/Stop, PreCompact/PostCompact — with stdin JSON payloads almost
-   field-for-field identical to Claude Code's, firing in **both** exec and the interactive
-   TUI, and a deny-capable PreToolUse (verified live). vibecast's existing `vibecast hook`
-   ingestion model ports nearly 1:1.
+   0.142.5). Verified live in both exec and the interactive TUI: SessionStart,
+   UserPromptSubmit, PreToolUse (deny-capable — blocked a command on screen), PostToolUse,
+   Stop — with stdin JSON payloads almost field-for-field identical to Claude Code's.
+   PermissionRequest, SubagentStart/Stop, PreCompact/PostCompact exist per docs but were
+   not triggered in the probe (capture fixtures before relying on them). vibecast's
+   existing `vibecast hook` ingestion model ports nearly 1:1.
 2. **pi's extension system is a strict superset of hooks**: in-process TypeScript modules
    receive the full lifecycle (session_start with sessionId, before_agent_start with the
    prompt, tool_execution_*/tool_call with **blocking + input mutation**, agent_end,
    session_shutdown) and can exec/POST freely. A single `vibecast.ts` extension replaces the
-   whole Claude plugin. pi also has a **mock provider** path that runs the real agent loop
-   with zero API keys — used by the conformance suite for credential-less CI.
+   whole Claude plugin. pi's provider API also lets vibecast ship a **conformance-owned
+   mock provider** extension (pattern verified live) that runs the real agent loop with
+   zero API keys — the conformance suite's credential-less CI mode.
 3. **The platform contract is already agent-neutral in shape.** The metadata subtypes
    (`prompt`, `tool_use`, `tool_use_end`, `session_start`, `assistant_response`, `plan`,
    `permission_request`, …) carry generic names; Claude leaks only in field naming
@@ -97,9 +99,9 @@ concentrated in the control plane, behind one interface, selected by `VIBECAST_A
 1. **pi auth in runners**: Claude Pro/Max OAuth through pi bills as Anthropic *extra usage*
    (per-token, not plan quota) per pi's docs. Alternatives: provider API key, or routing pi
    through pks-agent-gateway via `pi.registerProvider('anthropic', {baseUrl})`. Which?
-2. **Node 22 in runner images**: pi ≥0.75 (needed for `--session-id` preassign) requires
-   Node ≥22.19; devcontainer currently has Node 20 (caps pi at legacy 0.74.2, discovery-mode
-   resume only). Bump acceptable?
+2. **Node 22 in runner images**: pi ≥0.76 is needed for `--session-id` preassign, and the
+   Node ≥22.19 floor applies from 0.75; devcontainer currently has Node 20 (caps pi at
+   legacy 0.74.2, discovery-mode resume only). Bump acceptable?
 3. **Codex hook trust**: launch with `--dangerously-bypass-hook-trust` (two cosmetic warning
    items in the transcript) vs auto-answering the one-time "Hooks need review" dialog via
    send-keys. Spec assumes the flag; flip if the warning items bother viewers.

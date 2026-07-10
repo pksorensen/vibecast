@@ -14,9 +14,9 @@ Support legend: ✅ full · 🟡 partial/with-caveat · ❌ none · (cap) = capa
 | Interactive launch w/ first prompt | positional arg → interactive first message ✅ | positional arg auto-submits in TUI ✅ | positional arg auto-submits ✅ |
 | Append system prompt | `--append-system-prompt "$(cat f)"` ✅ | `-c developer_instructions="…"` (verified: appends as developer message, does **not** replace base) 🟡 + AGENTS.md | `--append-system-prompt <text\|file>` (repeatable) ✅ |
 | Working dir | `cd <dir> &&` prefix (today) | `-C/--cd <dir>`, `--add-dir` | cwd of process (sessions keyed by cwd) |
-| Event wiring install | `--plugin-dir <claude-plugin>` (hooks.json + .mcp.json) | write `hooks.json` ($CODEX_HOME or `<repo>/.codex/`), launch with `--dangerously-bypass-hook-trust` (or pre-answer trust dialog) | `-e /path/vibecast.ts` extension flag |
-| Permission bypass | `--dangerously-skip-permissions` (+ auto-answer of its confirm dialog) | `--dangerously-bypass-approvals-and-sandbox`, or `approval_policy`/`sandbox_mode` configs (no `--full-auto` in 0.142.5) | none needed — pi has **no** permission system (YOLO by design) |
-| Model / effort | `--model` (tier table haiku\|sonnet\|opus), `--effort low..max` | `-m <model>`, `-c model_reasoning_effort=…` | `--model <pattern>`, `--thinking off..xhigh` |
+| Event wiring install | `--plugin-dir <claude-plugin>` (hooks.json + .mcp.json) | write `hooks.json` into a **vibecast-managed `$CODEX_HOME`** (⚠ relocating CODEX_HOME relocates auth.json too — copy/link the real one; the `<repo>/.codex/` project layer is NOT used: it loads only if the project is trusted and it dirties the job worktree), launch with `--dangerously-bypass-hook-trust` | `-e /path/vibecast.ts` extension flag |
+| Permission bypass | `--dangerously-skip-permissions` (+ auto-answer of its confirm dialog) | `approval_policy=never` + `sandbox_mode=workspace-write` (+ writable roots). ⚠ `--dangerously-bypass-approvals-and-sandbox` is **forbidden** — the sandbox is the guard's apply_patch backstop (adapter-spec §4). No `--full-auto` in 0.142.5 | none needed — pi has **no** permission system (YOLO by design) |
+| Model / effort | `--model` (tier table haiku\|sonnet\|opus), `--effort low..max` | `-m <model>`, `-c model_reasoning_effort=…` | `--model <pattern>`, `--thinking off..xhigh` (help-text only — mapping unverified) |
 | Extra config | `--dangerously-load-development-channels` | `-c key=value` dotted TOML overrides; `-p` profiles; `CODEX_HOME` | `PI_CODING_AGENT_DIR`; `--session-dir`; `--no-*` discovery toggles |
 
 ## 2. TUI in tmux
@@ -50,7 +50,7 @@ Support legend: ✅ full · 🟡 partial/with-caveat · ❌ none · (cap) = capa
 
 | | Claude Code | Codex | pi |
 |---|---|---|---|
-| Mechanism | `UserPromptSubmit` hook (`prompt`) ✅ | `UserPromptSubmit` hook (`prompt`) ✅ | `before_agent_start` event (`prompt`, fires for argv + typed + RPC prompts) ✅; `input` event for raw pre-expansion text |
+| Mechanism | `UserPromptSubmit` hook (`prompt`) ✅ | `UserPromptSubmit` hook (`prompt`) ✅ | `before_agent_start` event (`prompt`; verified for argv + typed prompts; RPC path documented but unverified) ✅; `input` event for raw pre-expansion text |
 
 ## 6. Session identity + resume
 
@@ -74,7 +74,7 @@ Support legend: ✅ full · 🟡 partial/with-caveat · ❌ none · (cap) = capa
 |---|---|---|---|
 | Login flows | claude.ai OAuth (device-code paste flow detected via pane text + `oauth/authorize` URL) | `codex login` (browser, port 1455), `--device-auth`, `--with-api-key` (stdin); status: `codex login status` exit code | `/login` TUI → subscription OAuth (Anthropic Claude Pro/Max, ChatGPT, Copilot; PKCE + paste-redirect-URL fallback, headless-workable) or API key; env keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY…); `~/.pi/agent/auth.json` (key can be literal \| ENV_NAME \| `!cmd`) |
 | Logged-in probe | pane-scrape (today) | `codex login status` exit 0; `~/.codex/auth.json` presence + auth_mode ✅ | TUI banner "No models available. Use /login"; headless exit 1 "No API key found" ✅ |
-| URL classifier | `claude.ai` / `auth.anthropic` → `claude-login` | `auth.openai.com` / `chatgpt.com` → `codex-login` | `claude.ai/oauth` (subscription path) → `pi-login` |
+| URL classifier | `claude.ai` / `auth.anthropic` → `claude-login` (in production today) | `auth.openai.com` / `chatgpt.com` → `codex-login` (**assumed** — logged-out screens were not reproducible in the probe; pin empirically via conformance C12) | `claude.ai/oauth` (subscription path, URL captured live) → `pi-login` |
 | ⚠ Billing note | — | — | subscription use through third-party harnesses bills as Anthropic **extra usage** (per-token), not plan quota |
 | Proxy/gateway | ANTHROPIC_BASE_URL env | `model_providers` config (e.g. existing pks-foundry provider) | `pi.registerProvider('anthropic', {baseUrl})` from the vibecast extension, or models.json |
 
@@ -119,7 +119,7 @@ Support legend: ✅ full · 🟡 partial/with-caveat · ❌ none · (cap) = capa
 | `approvals.native_prompt` | ✅ | ✅ | ❌ |
 | `system_prompt.append` | ✅ | ✅ (developer_instructions) | ✅ |
 | `plan_events` | ✅ (ExitPlanMode) | ❌ | ❌ |
-| `subagent_events` | ✅ | ✅ (hooks exist; payload unverified) | ❌ (no subagents) |
+| `subagent_events` | ✅ | 🟡 declare only after fixtures are captured (hooks exist; payload unverified) | ❌ (no subagents) |
 | `compaction_events` | ✅ | 🟡 | ✅ |
 | `vibecast_tools` (stop_broadcast et al.) | ✅ MCP | ✅ MCP | ✅ extension-registered |
 | `transcript.upload` | ✅ (claude-jsonl) | ❌ (v1; format differs) | ❌ (v1) |

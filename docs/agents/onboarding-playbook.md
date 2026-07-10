@@ -49,16 +49,20 @@ On a branch `feat/multi-agent-<agent>` off `feat/multi-agent`:
 1. `internal/agent/<agent>/adapter.go` — implement the interface members in this order
    (each is independently testable):
    1. `Kind/DisplayName/BinaryName/Version` + registry entry.
-   2. `Capabilities()` — declare ONLY what Phase R verified. Undeclared = skipped, not shameful.
+   2. `Capabilities()` — declare ONLY what Phase R verified AND has committed fixtures.
+      Undeclared = skipped, not shameful.
    3. `BuildCommand`/`BuildResumeCommand` + golden tests (exact expected strings).
-   4. `InstallEventWiring` + `ParseHookEnvelope` (+ fixtures replay tests) +
-      `SerializeHookResponse` for the deny protocol.
-   5. `SessionIdentity` + `ListSessions`.
-   6. `EnsureVersion`.
-   7. `ScreenGates()`/`AnswerHandlers()`/`ClassifyURL` from the R3/R8/R9 exact strings —
+   4. `InstallEventWiring` + `ParseHookEnvelope` (returns 1..N events + attachments;
+      fixtures replay tests) + `Transcripts()` if the agent feeds content from its own
+      transcript files + `SerializeHookResponse` per (event × intent-origin).
+   5. Tool taxonomy: `MapToolName`, `WritePaths`, `SelfApprovingTools`,
+      `WorktreeExclusions`.
+   6. `SessionIdentity` + `ListSessions` + `ResolveSessionPath`.
+   7. `EnsureVersion`.
+   8. `ScreenGates()`/`AnswerHandlers()`/`ClassifyURL` from the R3/R8/R9 exact strings —
       include a `versionGlob` on every entry so UI churn in future agent versions is an
       additive table row, not a rewrite.
-   8. `RegisterVibecastTools`, `TelemetryEnv`, `BusySignal` (or ErrNotSupported).
+   9. `RegisterVibecastTools`, `TelemetryEnv`, `BusySignal` (or ErrNotSupported).
 2. If the agent needs a shipped artifact (like `claude-plugin/` or `pi/vibecast.ts`),
    put it next to the binary and mirror it into `npm/*/bin/` like the claude plugin.
 3. Keep EVERYTHING else untouched: no changes to tmux/relay/control-socket/emission code.
@@ -93,6 +97,8 @@ regressions are the main merge risk).
 
 ## Worked examples
 
-The codex and pi onboarding (2026-07) are the reference implementations of this playbook:
-[research/codex.md](research/codex.md) and [research/pi.md](research/pi.md) show what a
-completed Phase R worksheet looks like, and their branches show Phase I/V executed.
+[research/codex.md](research/codex.md) and [research/pi.md](research/pi.md) (2026-07)
+show what a completed Phase R worksheet looks like. Phase I/V for codex and pi are the
+first executions of this playbook, on `feat/multi-agent-codex` / `feat/multi-agent-pi`
+per the README rollout plan — once merged, those branches become the reference
+implementations.
