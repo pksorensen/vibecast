@@ -69,6 +69,7 @@ func TestConformance(t *testing.T) {
 			t.Run("C02_session_identity", func(t *testing.T) { scenarioC02(t, agent) })
 			t.Run("C03_initial_prompt", func(t *testing.T) { scenarioC03(t, agent) })
 			t.Run("C05_tool_events", func(t *testing.T) { scenarioC05(t, agent) })
+			t.Run("C06_turn_complete", func(t *testing.T) { scenarioC06(t, agent) })
 		})
 	}
 }
@@ -266,6 +267,52 @@ func scenarioC05(t *testing.T, agent string) {
 		return err == nil && strings.Contains(string(b), nonce)
 	})
 	t.Logf("write tool pair observed (toolUseId=%s) and %s written to workspace", useID, fname)
+}
+
+// scenarioC06 (turn-complete): after the agent replies, vibecast must observe the turn
+// ending. Prompt for a no-tool reply carrying a nonce, then assert (a) the reply surfaces
+// as `assistant_response` text containing the nonce and (b) a Stop-derived turn-end event
+// arrives — distinguishable because the Stop hook attaches `transcriptLines` while streamed
+// mid-turn assistant_response events do not. (For a no-tool turn both are the same event.)
+func scenarioC06(t *testing.T, agent string) {
+	nonce := newNonce(t)
+	promptFile := filepath.Join(t.TempDir(), "initial-prompt.txt")
+	body := "Reply with exactly this token on a line by itself: " + nonce +
+		". Do not use any tools and do not say anything else."
+	if err := os.WriteFile(promptFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	sess, mock := bringLive(t, agent, harness.LaunchConfig{
+		PromptShare: true,
+		ShareInfo:   true,
+		ExtraEnv:    map[string]string{"VIBECAST_INITIAL_PROMPT_FILE": promptFile},
+	})
+
+	waitFor(t, 120*time.Second, "assistant_response text containing the nonce", func() bool {
+		for _, e := range mock.MetadataPostsOfSubtype("assistant_response") {
+			if e.Decoded["sessionId"] != sess.SessionID {
+				continue
+			}
+			if txt, ok := e.Decoded["text"].(string); ok && strings.Contains(txt, nonce) {
+				return true
+			}
+		}
+		return false
+	})
+
+	waitFor(t, 30*time.Second, "Stop-derived turn-end assistant_response", func() bool {
+		for _, e := range mock.MetadataPostsOfSubtype("assistant_response") {
+			if e.Decoded["sessionId"] != sess.SessionID {
+				continue
+			}
+			if _, ok := e.Decoded["transcriptLines"]; ok {
+				return true
+			}
+		}
+		return false
+	})
+	t.Logf("reply surfaced and turn completed for nonce %s", nonce)
 }
 
 // isWriteToolName reports whether a raw agent tool name denotes a file-writing tool. Kept

@@ -891,13 +891,40 @@ func handleHookTaskCompleted() {
 	os.Exit(0)
 }
 
+// waitForFinalAssistant reads the transcript increment for a completed turn and
+// returns the accumulated lines plus the extracted final assistant text and usage.
+//
+// Claude Code fires the Stop hook BEFORE it has flushed the turn's final assistant
+// message to the transcript file (observed on fast, no-tool turns: at Stop time the
+// transcript holds only the user prompt; the assistant line lands milliseconds
+// later). A single read at Stop therefore loses the final response from the activity
+// feed. This keeps consuming increments — the cursor advances each read, so the
+// late-flushed assistant line is picked up exactly once — until an assistant text
+// block or usage appears, or the deadline elapses. Turns that legitimately end with
+// no assistant text pay the full (bounded) wait; that case is rare.
+func waitForFinalAssistant(streamID, transcriptPath string, timeout time.Duration) (lines []map[string]interface{}, text string, usage map[string]interface{}) {
+	lines = readTranscriptIncrement(streamID, transcriptPath)
+	deadline := time.Now().Add(timeout)
+	for {
+		text = extractAssistantText(lines)
+		usage = extractUsageFromTranscript(lines)
+		if text != "" || usage != nil {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		if more := readTranscriptIncrement(streamID, transcriptPath); len(more) > 0 {
+			lines = append(lines, more...)
+		}
+	}
+}
+
 func handleHookStop() {
 	_, sf, cwd, transcriptPath, _ := hookReadStdinAndFindSession()
 
-	transcriptLines := readTranscriptIncrement(sf.SessionID, transcriptPath)
-
-	text := extractAssistantText(transcriptLines)
-	usage := extractUsageFromTranscript(transcriptLines)
+	transcriptLines, text, usage := waitForFinalAssistant(sf.SessionID, transcriptPath, 2*time.Second)
 
 	if text != "" || usage != nil {
 		p := map[string]interface{}{
