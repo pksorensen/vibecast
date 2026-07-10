@@ -68,6 +68,7 @@ func TestConformance(t *testing.T) {
 			t.Run("C01_launch_registers", func(t *testing.T) { scenarioC01(t, agent) })
 			t.Run("C02_session_identity", func(t *testing.T) { scenarioC02(t, agent) })
 			t.Run("C03_initial_prompt", func(t *testing.T) { scenarioC03(t, agent) })
+			t.Run("C05_tool_events", func(t *testing.T) { scenarioC05(t, agent) })
 		})
 	}
 }
@@ -211,6 +212,67 @@ func scenarioC03(t *testing.T, agent string) {
 		return false
 	})
 	t.Logf("initial prompt surfaced as a prompt event carrying nonce %s", nonce)
+}
+
+// scenarioC05 (tool-events): the agent must run a write tool under vibecast and have both
+// ends of that tool call surface over the metadata channel. Prompt it to write a nonce file,
+// then assert a `tool_use` (write-class toolName) and a matching `tool_use_end` with the same
+// toolUseId, and — the ground truth — the file exists on disk with the nonce content.
+func scenarioC05(t *testing.T, agent string) {
+	nonce := newNonce(t)
+	fname := nonce + ".txt"
+	promptFile := filepath.Join(t.TempDir(), "initial-prompt.txt")
+	body := "Use the Write tool to create a file named exactly " + fname +
+		" in the current working directory, containing exactly the text " + nonce +
+		" and nothing else. Do not run any shell commands, and do nothing else afterward."
+	if err := os.WriteFile(promptFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	sess, mock := bringLive(t, agent, harness.LaunchConfig{
+		PromptShare: true,
+		ShareInfo:   true,
+		ExtraEnv:    map[string]string{"VIBECAST_INITIAL_PROMPT_FILE": promptFile},
+	})
+
+	var useID string
+	waitFor(t, 120*time.Second, "write-class tool_use event", func() bool {
+		for _, e := range mock.MetadataPostsOfSubtype("tool_use") {
+			if e.Decoded["sessionId"] != sess.SessionID {
+				continue
+			}
+			if name, _ := e.Decoded["toolName"].(string); isWriteToolName(name) {
+				if id, ok := e.Decoded["toolUseId"].(string); ok && id != "" {
+					useID = id
+					return true
+				}
+			}
+		}
+		return false
+	})
+
+	waitFor(t, 60*time.Second, "matching tool_use_end for toolUseId "+useID, func() bool {
+		for _, e := range mock.MetadataPostsOfSubtype("tool_use_end") {
+			if e.Decoded["sessionId"] == sess.SessionID && e.Decoded["toolUseId"] == useID {
+				return true
+			}
+		}
+		return false
+	})
+
+	target := filepath.Join(sess.Workspace, fname)
+	waitFor(t, 10*time.Second, "written file exists with nonce content", func() bool {
+		b, err := os.ReadFile(target)
+		return err == nil && strings.Contains(string(b), nonce)
+	})
+	t.Logf("write tool pair observed (toolUseId=%s) and %s written to workspace", useID, fname)
+}
+
+// isWriteToolName reports whether a raw agent tool name denotes a file-writing tool. Kept
+// permissive so it holds across agents (claude Write/Edit/MultiEdit, others' equivalents).
+func isWriteToolName(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "write") || strings.Contains(n, "edit") || strings.Contains(n, "create")
 }
 
 // newNonce returns a fresh alphanumeric token unlikely to collide or be altered by masking,
