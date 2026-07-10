@@ -33,9 +33,9 @@ import (
 // pass). The flag is both a global option and a `resume` subcommand option, and hooks.json
 // persists in CODEX_HOME across a resume, so both launch paths carry it.
 //
-// v1 covers the launch surface (model + initial prompt + resume + hook wiring). The
-// developer_instructions system-prompt append, effort, and guard-tuning land in later
-// conformance-driven increments.
+// v1 covers the launch surface: model + station system-prompt append
+// (developer_instructions) + initial prompt + resume + hook wiring. Effort and guard-tuning
+// land in later conformance-driven increments.
 type codexAdapter struct{}
 
 // codexHookTrustFlag skips codex's interactive hooks-review gate so vibecast's generated
@@ -49,19 +49,21 @@ func (codexAdapter) DiscoversOwnSessionID() bool { return true }
 func (codexAdapter) BuildCommand(binPath string, spec LaunchSpec) (string, error) {
 	cmd := binPath + codexHookTrustFlag
 	cmd += codexModelFlag(spec.Model, spec.ModelTier)
+	cmd += codexDeveloperInstructionsFlag(spec.SystemPromptFile, spec.SystemPromptInline)
 	cmd += codexInitialPromptArg(spec.InitialPromptFile)
 	return cmd, nil
 }
 
 func (codexAdapter) BuildResumeCommand(binPath string, spec LaunchSpec, agentSessionID string) (string, error) {
+	devInstr := codexDeveloperInstructionsFlag(spec.SystemPromptFile, spec.SystemPromptInline)
 	initialPrompt := codexInitialPromptArg(spec.InitialPromptFile)
 	if agentSessionID != "" && util.IsUUID(agentSessionID) {
-		return binPath + " resume" + codexHookTrustFlag + " " + agentSessionID + initialPrompt, nil
+		return binPath + " resume" + codexHookTrustFlag + devInstr + " " + agentSessionID + initialPrompt, nil
 	}
 	if agentSessionID != "" {
 		logDebug("[codex-cmd] dropping resume %q: not a UUID, falling back to --last\n", agentSessionID)
 	}
-	return binPath + " resume" + codexHookTrustFlag + " --last" + initialPrompt, nil
+	return binPath + " resume" + codexHookTrustFlag + devInstr + " --last" + initialPrompt, nil
 }
 
 // codexModelFlag maps the per-station model config to `codex -m <model>`. Codex model names
@@ -74,6 +76,31 @@ func codexModelFlag(model, tier string) string {
 	}
 	if t := strings.TrimSpace(tier); t != "" {
 		return " -m '" + strings.ReplaceAll(t, "'", "'\"'\"'") + "'"
+	}
+	return ""
+}
+
+// codexDeveloperInstructionsFlag maps the station's appended system prompt to codex's
+// `-c developer_instructions=<value>` override. Verified with `codex debug prompt-input`:
+// the value lands in a developer-role message that APPENDS to codex's base instructions
+// (never replaces them — that would be model_instructions_file, deliberately avoided).
+//
+// Codex parses the `-c` value as TOML and falls back to the raw string literal when the
+// parse fails (per `codex -c --help`), so multi-line station prose with embedded quotes,
+// newlines, backslashes, and even a leading `[section]` rides through `"$(cat 'file')"`
+// verbatim — probed empirically. This is the same file-first, shell-reads-at-exec shape as
+// claudeAppendSystemPromptFlag; no Go-side escaping is needed. (Edge case: a prompt that is
+// itself a single valid TOML token — e.g. exactly `true` or `"x"` — would be TOML-coerced;
+// real station prompts are always multi-word prose and never are.)
+func codexDeveloperInstructionsFlag(file, inline string) string {
+	// Prefer file-based (avoids shell quoting issues with special chars/JSON), matching claude.
+	if file != "" {
+		escapedPath := strings.ReplaceAll(file, "'", "'\"'\"'")
+		return " -c developer_instructions=\"$(cat '" + escapedPath + "')\""
+	}
+	if inline != "" {
+		escaped := strings.ReplaceAll(inline, "'", "'\"'\"'")
+		return " -c developer_instructions='" + escaped + "'"
 	}
 	return ""
 }

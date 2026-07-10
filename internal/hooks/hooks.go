@@ -125,6 +125,68 @@ func transcriptCursorPath(streamID, transcriptPath string) string {
 	return filepath.Join(transcriptCursorDir(streamID), prefix+".offset")
 }
 
+// codexMessageText concatenates the text of a codex rollout message's content blocks.
+// Codex uses "output_text" for assistant messages and "input_text" for user messages
+// (plain "text" tolerated for forward-compat); other block kinds are ignored.
+func codexMessageText(content interface{}) string {
+	arr, ok := content.([]interface{})
+	if !ok {
+		return ""
+	}
+	var sb strings.Builder
+	for _, block := range arr {
+		b, ok := block.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch b["type"] {
+		case "output_text", "input_text", "text":
+			if s, ok := b["text"].(string); ok {
+				sb.WriteString(s)
+			}
+		}
+	}
+	return sb.String()
+}
+
+// normalizeCodexRolloutLine translates one codex session-rollout JSONL entry into
+// vibecast's canonical (claude-shaped) transcript line — {type:"assistant", message:{
+// content:[{type:"text",text}]}} — so the shared ingestion layer (postAssistantTextBlocks,
+// extractAssistantText, extractUsageFromTranscript) consumes it unchanged. Returns ok=false
+// for any line that carries no assistant text.
+//
+// Only the assistant message is translated in v1; the developer message (the appended
+// system prompt), user echoes, reasoning, and function_call/output items are dropped here
+// (tool events surface via the PreToolUse/PostToolUse hooks, not the transcript). This is
+// the pragmatic seed of the adapter-spec TranscriptReader seam — it formalizes into a
+// per-agent reader when pi lands. Codex's rollout line types (session_meta, event_msg,
+// response_item, turn_context) are disjoint from claude's, so the caller routes by `type`
+// without needing to know which agent produced the file.
+func normalizeCodexRolloutLine(entry map[string]interface{}) (map[string]interface{}, bool) {
+	if entry["type"] != "response_item" {
+		return nil, false
+	}
+	payload, ok := entry["payload"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	if payload["type"] != "message" || payload["role"] != "assistant" {
+		return nil, false
+	}
+	text := codexMessageText(payload["content"])
+	if strings.TrimSpace(text) == "" {
+		return nil, false
+	}
+	return map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{
+			"content": []interface{}{
+				map[string]interface{}{"type": "text", "text": text},
+			},
+		},
+	}, true
+}
+
 func readTranscriptIncrement(streamID, transcriptPath string) []map[string]interface{} {
 	if transcriptPath == "" {
 		return nil
@@ -170,7 +232,9 @@ func readTranscriptIncrement(streamID, transcriptPath string) []map[string]inter
 		}
 
 		if t, ok := entry["type"].(string); ok && meaningfulTypes[t] {
-			lines = append(lines, entry)
+			lines = append(lines, entry) // claude-native transcript line
+		} else if norm, ok := normalizeCodexRolloutLine(entry); ok {
+			lines = append(lines, norm) // codex rollout line → canonical claude shape
 		}
 	}
 

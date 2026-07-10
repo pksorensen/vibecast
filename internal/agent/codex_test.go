@@ -56,6 +56,26 @@ func TestCodexBuildCommandGolden(t *testing.T) {
 			spec: LaunchSpec{Model: "weird'model"},
 			want: "codex --dangerously-bypass-hook-trust -m 'weird'\"'\"'model'",
 		},
+		{
+			name: "system prompt file appends via developer_instructions",
+			spec: LaunchSpec{SystemPromptFile: "/tmp/sys.txt"},
+			want: "codex --dangerously-bypass-hook-trust -c developer_instructions=\"$(cat '/tmp/sys.txt')\"",
+		},
+		{
+			name: "inline system prompt appends via developer_instructions",
+			spec: LaunchSpec{SystemPromptInline: "be terse"},
+			want: "codex --dangerously-bypass-hook-trust -c developer_instructions='be terse'",
+		},
+		{
+			name: "system prompt file wins over inline",
+			spec: LaunchSpec{SystemPromptFile: "/tmp/sys.txt", SystemPromptInline: "ignored"},
+			want: "codex --dangerously-bypass-hook-trust -c developer_instructions=\"$(cat '/tmp/sys.txt')\"",
+		},
+		{
+			name: "model then developer_instructions ordering (flags before positional)",
+			spec: LaunchSpec{Model: "gpt-5.5", SystemPromptFile: "/tmp/sys.txt"},
+			want: "codex --dangerously-bypass-hook-trust -m 'gpt-5.5' -c developer_instructions=\"$(cat '/tmp/sys.txt')\"",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -146,6 +166,13 @@ func TestCodexBuildResumeCommandGolden(t *testing.T) {
 	want = "codex resume --dangerously-bypass-hook-trust " + codexUUIDv7 + " \"$(cat '" + nudge + "')\""
 	if got != want {
 		t.Errorf("resume with nudge\n got: %q\nwant: %q", got, want)
+	}
+
+	// The station system prompt is re-applied on resume, before the positional thread id.
+	got, _ = ad.BuildResumeCommand("codex", LaunchSpec{SystemPromptFile: "/tmp/sys.txt"}, codexUUIDv7)
+	want = "codex resume --dangerously-bypass-hook-trust -c developer_instructions=\"$(cat '/tmp/sys.txt')\" " + codexUUIDv7
+	if got != want {
+		t.Errorf("resume with system prompt\n got: %q\nwant: %q", got, want)
 	}
 }
 
