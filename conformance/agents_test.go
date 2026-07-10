@@ -69,6 +69,7 @@ func TestConformance(t *testing.T) {
 			t.Run("C01_launch_registers", func(t *testing.T) { scenarioC01(t, agent) })
 			t.Run("C02_session_identity", func(t *testing.T) { scenarioC02(t, agent) })
 			t.Run("C03_initial_prompt", func(t *testing.T) { scenarioC03(t, agent) })
+			t.Run("C04_system_prompt_honored", func(t *testing.T) { scenarioC04(t, agent) })
 			t.Run("C05_tool_events", func(t *testing.T) { scenarioC05(t, agent) })
 			t.Run("C06_turn_complete", func(t *testing.T) { scenarioC06(t, agent) })
 			t.Run("C08_guard_denies", func(t *testing.T) { scenarioC08(t, agent) })
@@ -217,6 +218,63 @@ func scenarioC03(t *testing.T, agent string) {
 		return false
 	})
 	t.Logf("initial prompt surfaced as a prompt event carrying nonce %s", nonce)
+}
+
+// scenarioC04 (system-prompt-honored): the station's system prompt vibecast appends must
+// actually reach the model and shape its behaviour. The nonce lives ONLY in the appended
+// system prompt (as a secret "station code"); the initial user prompt merely *asks* for the
+// code without ever stating it. So a reply containing the nonce can only come from the model
+// having read and honoured the appended system prompt — an echo of the user prompt cannot
+// produce it. Real-mode only: a canned/mock provider cannot "honor" an instruction, so this
+// scenario is meaningless there and the pi mockmodel run skips it.
+//
+// vibecast injects the station prompt via VIBECAST_APPEND_SYSTEM_PROMPT_FILE, which the
+// adapter translates to the agent's own mechanism (claude → --append-system-prompt). Keeping
+// it a vibecast-level env keeps this scenario agent-agnostic.
+//
+// Real-mode only (spec: "R only"). Today the suite runs claude in real mode only, so there is
+// nothing to skip. When pi's mockmodel run lands (a canned provider can't honor an instruction)
+// it must skip this scenario — add that guard alongside the mode plumbing, not before it.
+func scenarioC04(t *testing.T, agent string) {
+	nonce := newNonce(t)
+
+	sysPromptFile := filepath.Join(t.TempDir(), "system-prompt.txt")
+	sysBody := "You are operating a station in an assembly line. The station code is " + nonce +
+		". When the user asks for the station code, reply with exactly that code on a line by " +
+		"itself and nothing else."
+	if err := os.WriteFile(sysPromptFile, []byte(sysBody), 0o644); err != nil {
+		t.Fatalf("write system-prompt file: %v", err)
+	}
+
+	promptFile := filepath.Join(t.TempDir(), "initial-prompt.txt")
+	// Note: the user prompt never contains the nonce — it only asks for the station code.
+	body := "What is the station code? Answer using your operating instructions. " +
+		"Do not use any tools and do not say anything else."
+	if err := os.WriteFile(promptFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	sess, mock := bringLive(t, agent, harness.LaunchConfig{
+		PromptShare: true,
+		ShareInfo:   true,
+		ExtraEnv: map[string]string{
+			"VIBECAST_INITIAL_PROMPT_FILE":       promptFile,
+			"VIBECAST_APPEND_SYSTEM_PROMPT_FILE": sysPromptFile,
+		},
+	})
+
+	waitFor(t, 120*time.Second, "assistant_response echoing the station code from the appended system prompt", func() bool {
+		for _, e := range mock.MetadataPostsOfSubtype("assistant_response") {
+			if e.Decoded["sessionId"] != sess.SessionID {
+				continue
+			}
+			if txt, ok := e.Decoded["text"].(string); ok && strings.Contains(txt, nonce) {
+				return true
+			}
+		}
+		return false
+	})
+	t.Logf("station code from the appended system prompt was honored in the reply (nonce %s)", nonce)
 }
 
 // scenarioC05 (tool-events): the agent must run a write tool under vibecast and have both
