@@ -721,14 +721,19 @@ func scenarioC11(t *testing.T, agent string) {
 
 	// Don't type until the agent process is up (session_start proves the SessionStart hook
 	// fired) — an early send-keys is silently dropped before the TUI captures the terminal.
-	waitFor(t, 90*time.Second, "session_start metadata (agent process up)", func() bool {
-		for _, e := range mock.MetadataPostsOfSubtype("session_start") {
-			if e.Decoded["sessionId"] == sess.SessionID {
-				return true
+	// Only agents that fire SessionStart eagerly at launch can be gated this way; a lazy agent
+	// (codex) has no session_start until the prompt is typed, so it relies on replReadyMarker
+	// below instead.
+	if firesSessionStartAtLaunch(agent) {
+		waitFor(t, 90*time.Second, "session_start metadata (agent process up)", func() bool {
+			for _, e := range mock.MetadataPostsOfSubtype("session_start") {
+				if e.Decoded["sessionId"] == sess.SessionID {
+					return true
+				}
 			}
-		}
-		return false
-	})
+			return false
+		})
+	}
 
 	// Best-effort wait for the idle input box to render (see replReadyMarker). Non-fatal + a
 	// settle so a TUI wording change can't wedge the scenario; keystrokes are PTY-buffered
@@ -772,9 +777,26 @@ func replReadyMarker(agent string) string {
 	switch agent {
 	case "claude":
 		return "bypass permissions"
+	case "codex":
+		// The codex TUI's welcome box carries this fixed brand string once it has drawn and is
+		// accepting input. The surrounding version/model text varies; this substring does not.
+		// For codex this marker is load-bearing (not just a settle trim): codex fires no
+		// SessionStart at idle, so C11 cannot gate typing on a session_start event and relies on
+		// this marker to know the REPL captured the PTY before send-keys.
+		return "OpenAI Codex"
 	default:
 		return ""
 	}
+}
+
+// firesSessionStartAtLaunch reports whether the agent emits its SessionStart hook eagerly at
+// REPL launch (claude) rather than lazily on the first turn (codex, which creates its session —
+// and fires SessionStart — only when a prompt is submitted). C11 uses this to decide whether it
+// may gate the pre-typing readiness wait on a session_start metadata event: for a lazy agent no
+// such event exists until AFTER the prompt is typed, so C11 falls back to the REPL readiness
+// marker (replReadyMarker) alone to know the TUI has captured the PTY.
+func firesSessionStartAtLaunch(agent string) bool {
+	return agent == "claude"
 }
 
 // resumeCommandFragment returns the substring the agent's relaunch command must contain to
@@ -785,6 +807,12 @@ func resumeCommandFragment(agent, priorID string) string {
 	switch agent {
 	case "claude":
 		return "--resume " + priorID
+	case "codex":
+		// codex resumes a thread positionally (`codex resume [OPTIONS] <SESSION_ID> [PROMPT]`),
+		// not via a --resume flag. The session id follows the always-present hook-trust flag on a
+		// no-system-prompt relaunch (C09 sets none), so this fragment proves the harvested id was
+		// named as the resume target.
+		return "resume --dangerously-bypass-hook-trust " + priorID
 	default:
 		// Same as claude until a divergent adapter overrides it.
 		return "--resume " + priorID
@@ -792,10 +820,12 @@ func resumeCommandFragment(agent, priorID string) string {
 }
 
 // isWriteToolName reports whether a raw agent tool name denotes a file-writing tool. Kept
-// permissive so it holds across agents (claude Write/Edit/MultiEdit, others' equivalents).
+// permissive so it holds across agents (claude Write/Edit/MultiEdit; codex's apply_patch,
+// its sole file-mutation tool; others' equivalents).
 func isWriteToolName(name string) bool {
 	n := strings.ToLower(name)
-	return strings.Contains(n, "write") || strings.Contains(n, "edit") || strings.Contains(n, "create")
+	return strings.Contains(n, "write") || strings.Contains(n, "edit") ||
+		strings.Contains(n, "create") || strings.Contains(n, "apply_patch")
 }
 
 // newNonce returns a fresh alphanumeric token unlikely to collide or be altered by masking,
