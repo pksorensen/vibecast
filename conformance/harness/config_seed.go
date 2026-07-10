@@ -43,9 +43,66 @@ func prepareAgentConfig(agent, baseDir, workspace string) (map[string]string, er
 	switch agent {
 	case "claude":
 		return prepareClaudeConfig(baseDir, workspace)
+	case "codex":
+		return prepareCodexConfig(baseDir, workspace)
 	default:
 		return nil, nil
 	}
+}
+
+// prepareCodexConfig builds an isolated CODEX_HOME under baseDir that is a copy of the real
+// ~/.codex (so codex stays logged in and inherits the fully-onboarded config: model
+// providers, completed first-run markers), with the throwaway workspace added as a trusted
+// project so the hooks layer loads and no folder-trust prompt can block. Real user files are
+// only read, never written.
+//
+// CODEX_HOME relocates the entire codex config dir (auth + config), so both auth.json and
+// config.toml are copied verbatim. Absence of auth.json is tolerated (env-key/model-provider
+// auth may cover it) — the trust seed is the load-bearing part.
+func prepareCodexConfig(baseDir, workspace string) (map[string]string, error) {
+	realDir := os.Getenv("CODEX_HOME")
+	if realDir == "" {
+		realDir = filepath.Join(os.Getenv("HOME"), ".codex")
+	}
+	cfgDir := filepath.Join(baseDir, "codex-home")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		return nil, err
+	}
+
+	// Copy auth.json (0600) so `codex login status` stays green against the same account.
+	if auth, err := os.ReadFile(filepath.Join(realDir, "auth.json")); err == nil {
+		if err := os.WriteFile(filepath.Join(cfgDir, "auth.json"), auth, 0o600); err != nil {
+			return nil, err
+		}
+	}
+
+	// Copy config.toml verbatim (inherits model_providers + onboarding state), then append a
+	// trust entry for the throwaway workspace. A section header — not a bare dotted key at EOF
+	// — is required: a trailing `projects."x".trust_level` would inherit the last table's
+	// context (e.g. land under [model_providers.pks-foundry]). Distinct `[projects."path"]`
+	// sub-tables don't collide with any existing project trust entry.
+	var toml strings.Builder
+	if base, err := os.ReadFile(filepath.Join(realDir, "config.toml")); err == nil {
+		toml.Write(base)
+		if !strings.HasSuffix(toml.String(), "\n") {
+			toml.WriteByte('\n')
+		}
+	}
+	trustPaths := map[string]bool{workspace: true}
+	if rp, err := filepath.EvalSymlinks(workspace); err == nil {
+		trustPaths[rp] = true
+	}
+	for p := range trustPaths {
+		// TOML basic-string escaping for the quoted key: backslash and double-quote.
+		esc := strings.ReplaceAll(p, `\`, `\\`)
+		esc = strings.ReplaceAll(esc, `"`, `\"`)
+		fmt.Fprintf(&toml, "\n[projects.\"%s\"]\ntrust_level = \"trusted\"\n", esc)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(toml.String()), 0o600); err != nil {
+		return nil, err
+	}
+
+	return map[string]string{"CODEX_HOME": cfgDir}, nil
 }
 
 // prepareClaudeConfig builds an isolated CLAUDE_CONFIG_DIR under baseDir that is a copy of

@@ -64,6 +64,17 @@ func IsUUIDv4(s string) bool {
 	return uuidv4Re.MatchString(s)
 }
 
+// uuidAnyRe matches a syntactically valid RFC-4122 UUID of any version (1–8) and
+// variant (8/9/a/b). Codex session ids are UUIDv7, which uuidv4Re rejects, so the codex
+// adapter guards its resume id with this instead of IsUUIDv4. It still rejects vibecast's
+// 8-char stream ids, which is the point of the guard.
+var uuidAnyRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
+
+// IsUUID reports whether s is a syntactically valid UUID of any version (v1–v8).
+func IsUUID(s string) bool {
+	return uuidAnyRe.MatchString(s)
+}
+
 // GetServerHost returns the AGENTICS_SERVER env var (or the deprecated AGENTIC_SERVER) or the default host.
 func GetServerHost() string {
 	if h := os.Getenv("AGENTICS_SERVER"); h != "" {

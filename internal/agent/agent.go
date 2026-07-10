@@ -63,8 +63,10 @@ func For(kind Kind) (Adapter, error) {
 	switch kind {
 	case KindClaude, "":
 		return claudeAdapter{}, nil
+	case KindCodex:
+		return codexAdapter{}, nil
 	default:
-		return nil, fmt.Errorf("unknown VIBECAST_AGENT %q (supported: claude)", kind)
+		return nil, fmt.Errorf("unknown VIBECAST_AGENT %q (supported: claude, codex)", kind)
 	}
 }
 
