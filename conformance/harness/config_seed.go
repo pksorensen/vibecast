@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/pksorensen/vibecast/internal/agent"
 )
 
 // envWithOverrides returns base ("KEY=VAL" slice) with every key in overrides replaced or
@@ -39,12 +41,12 @@ func envWithOverrides(base []string, overrides map[string]string) []string {
 // It copies the user's real credentials into the throwaway home so the agent stays logged
 // in, and never modifies the real config. Agents without seeding support yet (codex/pi land
 // with their adapters) return nil env — their scenarios will pre-trust another way.
-func prepareAgentConfig(agent, baseDir, workspace string) (map[string]string, error) {
+func prepareAgentConfig(agent, baseDir, workspace, vibecastBin string) (map[string]string, error) {
 	switch agent {
 	case "claude":
 		return prepareClaudeConfig(baseDir, workspace)
 	case "codex":
-		return prepareCodexConfig(baseDir, workspace)
+		return prepareCodexConfig(baseDir, workspace, vibecastBin)
 	default:
 		return nil, nil
 	}
@@ -59,7 +61,12 @@ func prepareAgentConfig(agent, baseDir, workspace string) (map[string]string, er
 // CODEX_HOME relocates the entire codex config dir (auth + config), so both auth.json and
 // config.toml are copied verbatim. Absence of auth.json is tolerated (env-key/model-provider
 // auth may cover it) — the trust seed is the load-bearing part.
-func prepareCodexConfig(baseDir, workspace string) (map[string]string, error) {
+//
+// It also writes a hooks.json into the isolated CODEX_HOME (via agent.CodexHooksJSON, the
+// same wiring vibecast will ship in production) so codex fires the vibecast lifecycle hooks —
+// most importantly SessionStart, which drives the discover-identity flow. The codex adapter
+// launches with --dangerously-bypass-hook-trust so these load without the interactive gate.
+func prepareCodexConfig(baseDir, workspace, vibecastBin string) (map[string]string, error) {
 	realDir := os.Getenv("CODEX_HOME")
 	if realDir == "" {
 		realDir = filepath.Join(os.Getenv("HOME"), ".codex")
@@ -100,6 +107,15 @@ func prepareCodexConfig(baseDir, workspace string) (map[string]string, error) {
 	}
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(toml.String()), 0o600); err != nil {
 		return nil, err
+	}
+
+	// Wire vibecast's lifecycle hooks. Written into CODEX_HOME/hooks.json — the config-layer
+	// location codex loads regardless of workspace trust. The absolute vibecast path is baked
+	// in (CodexHooksJSON), so the hook subprocess resolves without PATH assumptions.
+	if vibecastBin != "" {
+		if err := os.WriteFile(filepath.Join(cfgDir, "hooks.json"), agent.CodexHooksJSON(vibecastBin), 0o600); err != nil {
+			return nil, err
+		}
 	}
 
 	return map[string]string{"CODEX_HOME": cfgDir}, nil

@@ -47,6 +47,12 @@ type Adapter interface {
 	Kind() Kind
 	// BinaryName is the executable the caller resolves with exec.LookPath.
 	BinaryName() string
+	// DiscoversOwnSessionID reports whether the agent generates its own session id at
+	// runtime (surfaced via the SessionStart hook) rather than accepting a pre-assigned
+	// one. When true, the launch path records an empty session-id placeholder and the
+	// SessionStart hook writes back the discovered id (session.RecordDiscoveredSessionID);
+	// when false (claude), the launch path pre-assigns the id and passes it to BuildCommand.
+	DiscoversOwnSessionID() bool
 	// BuildCommand returns the shell command that launches a fresh agent session.
 	// binPath is the exec.LookPath-resolved absolute binary path. The caller is
 	// responsible for the `cd <workdir> && ` prefix and (restart path only) the

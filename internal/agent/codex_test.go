@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -12,9 +14,11 @@ import (
 const codexUUIDv7 = "019f4cf6-5e8d-7abc-8def-0123456789ab"
 
 // TestCodexBuildCommandGolden pins the fresh-launch command strings. Codex launches with no
-// permission-skip flag (sandbox is the backstop) and never pre-assigns a session id
-// (discover-identity via the SessionStart hook), so AgentSessionID is ignored on a fresh
-// launch even when set.
+// permission-skip flag (sandbox is the backstop) but always carries
+// --dangerously-bypass-hook-trust (vibecast ships a hooks.json; this skips the interactive
+// hooks-review gate — hook-trust only, never the sandbox bypass). It never pre-assigns a
+// session id (discover-identity via the SessionStart hook), so AgentSessionID is ignored on
+// a fresh launch even when set.
 func TestCodexBuildCommandGolden(t *testing.T) {
 	ad := codexAdapter{}
 	tests := []struct {
@@ -25,32 +29,32 @@ func TestCodexBuildCommandGolden(t *testing.T) {
 		{
 			name: "bare",
 			spec: LaunchSpec{},
-			want: "codex",
+			want: "codex --dangerously-bypass-hook-trust",
 		},
 		{
 			name: "session id ignored on fresh launch (discover-identity)",
 			spec: LaunchSpec{AgentSessionID: codexUUIDv7},
-			want: "codex",
+			want: "codex --dangerously-bypass-hook-trust",
 		},
 		{
 			name: "explicit model",
 			spec: LaunchSpec{Model: "gpt-5.5"},
-			want: "codex -m 'gpt-5.5'",
+			want: "codex --dangerously-bypass-hook-trust -m 'gpt-5.5'",
 		},
 		{
 			name: "model tier passed through as model name",
 			spec: LaunchSpec{ModelTier: "gpt-5.5-codex"},
-			want: "codex -m 'gpt-5.5-codex'",
+			want: "codex --dangerously-bypass-hook-trust -m 'gpt-5.5-codex'",
 		},
 		{
 			name: "explicit model wins over tier",
 			spec: LaunchSpec{Model: "o3", ModelTier: "gpt-5.5"},
-			want: "codex -m 'o3'",
+			want: "codex --dangerously-bypass-hook-trust -m 'o3'",
 		},
 		{
 			name: "model with single quote is escaped",
 			spec: LaunchSpec{Model: "weird'model"},
-			want: "codex -m 'weird'\"'\"'model'",
+			want: "codex --dangerously-bypass-hook-trust -m 'weird'\"'\"'model'",
 		},
 	}
 	for _, tt := range tests {
@@ -61,6 +65,11 @@ func TestCodexBuildCommandGolden(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("BuildCommand mismatch\n got: %q\nwant: %q", got, tt.want)
+			}
+			// Safety invariant: hook-trust is bypassed, but the sandbox/approval backstop
+			// must NEVER be. A regression here removes codex's guard floor.
+			if strings.Contains(got, "--dangerously-bypass-approvals-and-sandbox") {
+				t.Errorf("command must never bypass sandbox/approvals: %q", got)
 			}
 		})
 	}
@@ -84,21 +93,21 @@ func TestCodexInitialPromptArg(t *testing.T) {
 	missing := filepath.Join(dir, "nope.txt")
 
 	got, _ := ad.BuildCommand("codex", LaunchSpec{InitialPromptFile: present})
-	want := "codex \"$(cat '" + present + "')\""
+	want := "codex --dangerously-bypass-hook-trust \"$(cat '" + present + "')\""
 	if got != want {
 		t.Errorf("present prompt file\n got: %q\nwant: %q", got, want)
 	}
 
 	// prompt + model preserves flag-before-positional ordering
 	got, _ = ad.BuildCommand("codex", LaunchSpec{Model: "gpt-5.5", InitialPromptFile: present})
-	want = "codex -m 'gpt-5.5' \"$(cat '" + present + "')\""
+	want = "codex --dangerously-bypass-hook-trust -m 'gpt-5.5' \"$(cat '" + present + "')\""
 	if got != want {
 		t.Errorf("model + prompt\n got: %q\nwant: %q", got, want)
 	}
 
 	for _, f := range []string{empty, missing, ""} {
 		got, _ := ad.BuildCommand("codex", LaunchSpec{InitialPromptFile: f})
-		if got != "codex" {
+		if got != "codex --dangerously-bypass-hook-trust" {
 			t.Errorf("prompt file %q should be dropped, got: %q", f, got)
 		}
 	}
@@ -111,13 +120,13 @@ func TestCodexBuildResumeCommandGolden(t *testing.T) {
 	ad := codexAdapter{}
 
 	got, _ := ad.BuildResumeCommand("codex", LaunchSpec{}, codexUUIDv7)
-	want := "codex resume " + codexUUIDv7
+	want := "codex resume --dangerously-bypass-hook-trust " + codexUUIDv7
 	if got != want {
 		t.Errorf("resume uuidv7\n got: %q\nwant: %q", got, want)
 	}
 
 	got, _ = ad.BuildResumeCommand("codex", LaunchSpec{}, "short123")
-	want = "codex resume --last"
+	want = "codex resume --dangerously-bypass-hook-trust --last"
 	if got != want {
 		t.Errorf("resume non-uuid falls back to --last\n got: %q\nwant: %q", got, want)
 	}
@@ -134,9 +143,66 @@ func TestCodexBuildResumeCommandGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ = ad.BuildResumeCommand("codex", LaunchSpec{InitialPromptFile: nudge}, codexUUIDv7)
-	want = "codex resume " + codexUUIDv7 + " \"$(cat '" + nudge + "')\""
+	want = "codex resume --dangerously-bypass-hook-trust " + codexUUIDv7 + " \"$(cat '" + nudge + "')\""
 	if got != want {
 		t.Errorf("resume with nudge\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestCodexHooksJSON pins the generated hooks.json: valid JSON, the claude-compatible
+// schema shape (event → matcher blocks → command hooks), the vibecast binary path baked
+// absolute into every command, and the SessionStart→`hook session` discover-identity wiring
+// plus the two PreToolUse blocks (guard + tool).
+func TestCodexHooksJSON(t *testing.T) {
+	const bin = "/opt/vibecast/vibecast"
+	raw := CodexHooksJSON(bin)
+
+	var doc struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("hooks.json is not valid JSON: %v\n%s", err, raw)
+	}
+
+	want := map[string][]string{
+		"SessionStart":     {bin + " hook session"},
+		"UserPromptSubmit": {bin + " hook prompt"},
+		"PreToolUse":       {bin + " hook guard", bin + " hook tool"},
+		"PostToolUse":      {bin + " hook post-tool"},
+		"Stop":             {bin + " hook stop"},
+	}
+	for event, cmds := range want {
+		blocks, ok := doc.Hooks[event]
+		if !ok {
+			t.Errorf("missing event %q", event)
+			continue
+		}
+		if len(blocks) != len(cmds) {
+			t.Errorf("event %q: got %d blocks, want %d", event, len(blocks), len(cmds))
+			continue
+		}
+		for i, block := range blocks {
+			if len(block.Hooks) != 1 {
+				t.Errorf("event %q block %d: got %d command hooks, want 1", event, i, len(block.Hooks))
+				continue
+			}
+			if block.Hooks[0].Type != "command" {
+				t.Errorf("event %q block %d: type = %q, want command", event, i, block.Hooks[0].Type)
+			}
+			if block.Hooks[0].Command != cmds[i] {
+				t.Errorf("event %q block %d: command = %q, want %q", event, i, block.Hooks[0].Command, cmds[i])
+			}
+		}
+	}
+
+	// Absolute binary path everywhere — codex has no ${CLAUDE_PLUGIN_ROOT} expansion.
+	if strings.Contains(string(raw), "${") {
+		t.Errorf("hooks.json must not rely on shell/env expansion: %s", raw)
 	}
 }
 

@@ -13,8 +13,9 @@ import (
 // command strings so VIBECAST_AGENT=claude (and unset) stays a no-op refactor.
 type claudeAdapter struct{}
 
-func (claudeAdapter) Kind() Kind         { return KindClaude }
-func (claudeAdapter) BinaryName() string { return "claude" }
+func (claudeAdapter) Kind() Kind                  { return KindClaude }
+func (claudeAdapter) BinaryName() string          { return "claude" }
+func (claudeAdapter) DiscoversOwnSessionID() bool { return false }
 
 func (claudeAdapter) BuildCommand(binPath string, spec LaunchSpec) (string, error) {
 	cmd := binPath + " --dangerously-skip-permissions"

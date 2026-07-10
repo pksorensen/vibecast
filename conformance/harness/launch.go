@@ -122,7 +122,7 @@ func Launch(cfg LaunchConfig) (*Session, error) {
 	// job-mode onboarding auto-answers, so a fresh workspace would block at the trust dialog.
 	var seedEnv map[string]string
 	if !cfg.NoConfigSeed {
-		seedEnv, err = prepareAgentConfig(cfg.Agent, cfg.BaseDir, workspace)
+		seedEnv, err = prepareAgentConfig(cfg.Agent, cfg.BaseDir, workspace, cfg.VibecastBin)
 		if err != nil {
 			return nil, fmt.Errorf("prepare %s config home: %w", cfg.Agent, err)
 		}

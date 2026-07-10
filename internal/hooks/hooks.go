@@ -425,6 +425,18 @@ func handleHookSession() {
 	stdinData, sf, _, transcriptPath, claudeSessionId := hookReadStdinAndFindSession()
 	util.DebugLog("[session] checkpoint A: entry, claudeSessionId=%s", claudeSessionId)
 
+	// Discover-identity: for agents that generate their own session id (codex's UUIDv7),
+	// the SessionStart hook is where we first learn it. Record it into the session file so it
+	// surfaces the same way a pre-assigned (claude) id does. Fills empties only, so this is a
+	// no-op for claude, whose id is already written at pane creation.
+	if claudeSessionId != "" {
+		if changed, err := session.RecordDiscoveredSessionID(sf.SessionID, claudeSessionId); err != nil {
+			util.DebugLog("[session] RecordDiscoveredSessionID error: %v", err)
+		} else if changed {
+			util.DebugLog("[session] recorded discovered session id %s for stream %s", claudeSessionId, sf.SessionID)
+		}
+	}
+
 	var hookInput struct {
 		SessionID string `json:"session_id"`
 		Source    string `json:"source"`

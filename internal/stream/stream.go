@@ -483,12 +483,20 @@ func SpawnPane(sessionName, sessionID, paneId, name string, status *types.Shared
 	if claudeResumeID != "" {
 		claudeSessionID = claudeResumeID
 	}
-	logDebug("[pane:%s] claude session ID: %s (resume=%v)\n", paneId, claudeSessionID, claudeResumeID != "")
 
 	ad, err := agent.Selected()
 	if err != nil {
 		return nil, err
 	}
+
+	// Discover-identity agents (e.g. codex) generate their own session id at first turn and
+	// surface it via the SessionStart hook; a pre-assigned id would be bogus (the agent never
+	// uses it). For a fresh launch, record an EMPTY placeholder so the hook's write-back
+	// (session.RecordDiscoveredSessionID) fills in the real id. A resume keeps the known id.
+	if claudeResumeID == "" && ad.DiscoversOwnSessionID() {
+		claudeSessionID = ""
+	}
+	logDebug("[pane:%s] session ID: %q (resume=%v, discover=%v)\n", paneId, claudeSessionID, claudeResumeID != "", ad.DiscoversOwnSessionID())
 
 	// Build the command to run directly in the tmux window (no shell prompt visible)
 	var windowCmd string

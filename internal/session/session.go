@@ -45,6 +45,58 @@ func DeleteSessionFile(sessionID string) {
 	os.Remove(filepath.Join(SessionsDir(), sessionID+".json"))
 }
 
+// RecordDiscoveredSessionID records an agent session id discovered at runtime (via the
+// SessionStart hook) into the session file, for "discover-identity" agents like codex that
+// generate their own id rather than accepting a pre-assigned one. It fills ONLY empty
+// identity fields — the top-level ClaudeSessionID and the first pane whose id is empty — so
+// for a pre-assign agent (claude), where the id is already written at pane creation, this is
+// a no-op. Returns true if the file changed.
+//
+// The write re-reads the latest on-disk state first, so it fills in the gap without
+// clobbering fields a concurrent broadcaster write has set. Today the broadcaster is
+// otherwise the single session-file writer; this hook-side write is safe because it runs
+// after pane creation and only fills empties. If hook/broadcaster writes ever need to
+// overlap on the same field, route this through the control socket so the broadcaster owns
+// the write.
+func RecordDiscoveredSessionID(streamID, discovered string) (bool, error) {
+	if streamID == "" || discovered == "" {
+		return false, nil
+	}
+	path := filepath.Join(SessionsDir(), streamID+".json")
+	sf, err := ReadSessionFile(path)
+	if err != nil {
+		return false, err
+	}
+	// Already recorded anywhere → nothing to do (claude fast path; idempotent on re-fire).
+	if sf.ClaudeSessionID == discovered {
+		return false, nil
+	}
+	for _, p := range sf.Panes {
+		if p.ClaudeSessionID == discovered {
+			return false, nil
+		}
+	}
+	changed := false
+	if sf.ClaudeSessionID == "" {
+		sf.ClaudeSessionID = discovered
+		changed = true
+	}
+	for i := range sf.Panes {
+		if sf.Panes[i].ClaudeSessionID == "" {
+			sf.Panes[i].ClaudeSessionID = discovered
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := WriteSessionFile(*sf); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ReadSessionFile reads and parses a session file.
 func ReadSessionFile(path string) (*types.SessionFile, error) {
 	data, err := os.ReadFile(path)

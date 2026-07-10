@@ -159,8 +159,25 @@ func scenarioC01(t *testing.T, agent string) {
 // to the platform. Assert a `session_start` metadata event with a non-empty claudeSessionId,
 // and that the reported id agrees with what vibecast recorded in its session file (the
 // preassign consistency check for claude/pi; discover agents just need any stable id).
+//
+// The launch carries a benign task prompt, exactly as vibecast does in ALP job mode. This
+// is load-bearing for discover-identity agents: codex creates its session (and fires its
+// SessionStart hook, source=startup) lazily on the first turn — not at idle TUI launch —
+// so a no-prompt launch would never produce a session identity. claude fires SessionStart
+// eagerly at launch, so the prompt is harmless there. Keeping the setup uniform (every agent
+// gets a task prompt) matches how the Runner actually starts a station.
 func scenarioC02(t *testing.T, agent string) {
-	sess, mock := bringLive(t, agent, harness.LaunchConfig{PromptShare: true, ShareInfo: true})
+	promptFile := filepath.Join(t.TempDir(), "initial-prompt.txt")
+	body := "Conformance session-identity check. Reply with one short line; do not run any tools."
+	if err := os.WriteFile(promptFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	sess, mock := bringLive(t, agent, harness.LaunchConfig{
+		PromptShare: true,
+		ShareInfo:   true,
+		ExtraEnv:    map[string]string{"VIBECAST_INITIAL_PROMPT_FILE": promptFile},
+	})
 
 	var reportedID string
 	waitFor(t, 90*time.Second, "session_start metadata with non-empty claudeSessionId", func() bool {
