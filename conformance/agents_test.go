@@ -72,6 +72,7 @@ func TestConformance(t *testing.T) {
 			t.Run("C05_tool_events", func(t *testing.T) { scenarioC05(t, agent) })
 			t.Run("C06_turn_complete", func(t *testing.T) { scenarioC06(t, agent) })
 			t.Run("C08_guard_denies", func(t *testing.T) { scenarioC08(t, agent) })
+			t.Run("C10_session_end_reported", func(t *testing.T) { scenarioC10(t, agent) })
 			t.Run("C11_prompt_injection_tui", func(t *testing.T) { scenarioC11(t, agent) })
 		})
 	}
@@ -380,6 +381,72 @@ func scenarioC08(t *testing.T, agent string) {
 		return false
 	})
 	t.Logf("guard blocked and recorded the process-kill; turn completed (nonce %s)", nonce)
+}
+
+// scenarioC10 (session-end-reported): the operator's clean stop must be reported to the
+// platform. POST /stop-broadcast on the control socket with a completion message and
+// conclusion; after vibecast's ~10s flush grace a session-event `end` must arrive carrying
+// that message + conclusion + the job id. The grace is load-bearing (it lets trailing
+// tool_use_end/assistant_response metadata land first), so the scenario also asserts the end
+// did NOT arrive instantly. A pane-kill would NOT produce `end` — that is ws-relay's job in
+// prod and out of the mock's scope — so this exercises the control-socket path specifically.
+//
+// A job id is set (that is what puts `jobId` on the end event) without AGENTICS_JOB_MODE:
+// full job-mode boot drives an interactive onboarding auto-answer handshake that needs a
+// cooperating server, which the minimal mock doesn't play — a separate scenario's concern.
+func scenarioC10(t *testing.T, agent string) {
+	nonce := newNonce(t)
+
+	sess, mock := bringLive(t, agent, harness.LaunchConfig{
+		JobID:       "test-job-" + nonce,
+		PromptShare: true,
+		ShareInfo:   true,
+	})
+	// This scenario turns on the shutdown ordering (grace → end POST → teardown). If it ever
+	// regresses, vibecast's captured stderr is the fastest way to see where the flush was cut
+	// off — the file survives the pane's death, unlike a live pane capture.
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("vibecast stderr on failure:\n%s", sess.Stderr())
+		}
+	})
+
+	ph, err := sess.WaitPhase(30*time.Second, "live")
+	if err != nil {
+		t.Fatalf("wait for live before stop: %v", err)
+	}
+	t.Logf("phase before stop: %s", ph)
+
+	message := "Conformance job complete " + nonce
+	start := time.Now()
+	if err := sess.StopBroadcast(message, "success"); err != nil {
+		t.Fatalf("stop-broadcast: %v", err)
+	}
+
+	var elapsed time.Duration
+	waitFor(t, 40*time.Second, "session-event end carrying our message, conclusion, and jobId", func() bool {
+		for _, e := range mock.SessionEvents() {
+			if e.Decoded["event"] != "end" || e.Decoded["sessionId"] != sess.SessionID {
+				continue
+			}
+			msgOK := false
+			if m, ok := e.Decoded["message"].(string); ok && strings.Contains(m, nonce) {
+				msgOK = true
+			}
+			if msgOK && e.Decoded["conclusion"] == "success" && e.Decoded["jobId"] == sess.JobID {
+				elapsed = time.Since(start)
+				return true
+			}
+		}
+		return false
+	})
+
+	// The end must wait out the flush grace, not tear down instantly.
+	if elapsed < 9*time.Second {
+		t.Fatalf("session-event end arrived after only %s; expected it to wait out the ~10s flush grace", elapsed)
+	}
+	t.Logf("session ended cleanly: conclusion=success jobId=%s after %s grace (nonce %s)",
+		sess.JobID, elapsed.Round(time.Second), nonce)
 }
 
 // scenarioC11 (prompt-injection-tui): a prompt typed straight into the agent's REPL — not

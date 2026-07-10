@@ -24,6 +24,7 @@ type LaunchConfig struct {
 	BaseDir     string            // caller-owned temp base (e.g. t.TempDir())
 	ExtraEnv    map[string]string // extra/override env for vibecast
 	JobMode     bool              // sets AGENTICS_JOB_MODE=1
+	JobID       string            // AGENTICS_JOB_ID when JobMode (default "test-<sessionId>")
 	PromptShare bool              // /start-stream promptSharing
 	ShareInfo   bool              // /start-stream shareProjectInfo
 
@@ -41,9 +42,23 @@ type Session struct {
 	VibecastHome string
 	Workspace    string
 	SessionID    string
+	JobID        string // AGENTICS_JOB_ID, non-empty only in job mode
 	ControlSock  string
+	StderrLog    string // file capturing vibecast's stderr (survives the pane's death)
 
 	ctrl *http.Client
+}
+
+// Stderr returns the full captured vibecast stderr log (empty string if unreadable).
+func (s *Session) Stderr() string {
+	if s.StderrLog == "" {
+		return ""
+	}
+	b, err := os.ReadFile(s.StderrLog)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // Launch starts vibecast inside a detached tmux session on a private -S socket, mimicking
@@ -77,8 +92,19 @@ func Launch(cfg LaunchConfig) (*Session, error) {
 		"PI_SKIP_VERSION_CHECK":       "1",
 		"VIBECAST_DEBUG":              "1",
 	}
+	// AGENTICS_JOB_ID is what StopStream stamps onto the session-event `end` (it keys off the
+	// id alone, independent of AGENTICS_JOB_MODE). JobMode additionally drives the interactive
+	// onboarding auto-answer flow, which needs a cooperating server and is out of the minimal
+	// mock's scope — so the two are set independently here.
+	jobID := cfg.JobID
 	if cfg.JobMode {
 		env["AGENTICS_JOB_MODE"] = "1"
+		if jobID == "" {
+			jobID = "test-" + sessionID
+		}
+	}
+	if jobID != "" {
+		env["AGENTICS_JOB_ID"] = jobID
 	}
 	for k, v := range cfg.ExtraEnv {
 		env[k] = v
@@ -116,7 +142,11 @@ func Launch(cfg LaunchConfig) (*Session, error) {
 	for _, k := range keys {
 		args = append(args, k+"="+env[k])
 	}
-	args = append(args, cfg.VibecastBin)
+	// Redirect vibecast's stderr to a file so its final shutdown logs survive the pane's
+	// death (a 1s pane-capture poll misses the last ~1s before the runner session is torn
+	// down). `exec` keeps the same PID; the `env` prefix already populated the environment.
+	stderrLog := filepath.Join(cfg.BaseDir, "vibecast.stderr")
+	args = append(args, "sh", "-c", `exec "$0" 2>> "$1"`, cfg.VibecastBin, stderrLog)
 
 	cmd := exec.Command("tmux", args...)
 	// The tmux server inherits the environment of the process that starts it; agent panes
@@ -135,7 +165,9 @@ func Launch(cfg LaunchConfig) (*Session, error) {
 		VibecastHome: vibecastHome,
 		Workspace:    workspace,
 		SessionID:    sessionID,
+		JobID:        jobID,
 		ControlSock:  filepath.Join(vibecastHome, ".vibecast", "control.sock"),
+		StderrLog:    stderrLog,
 	}
 	s.ctrl = &http.Client{
 		Timeout: 8 * time.Second,
@@ -217,14 +249,23 @@ func (s *Session) WaitPhase(timeout time.Duration, wanted ...string) (string, er
 	return last, fmt.Errorf("phase never reached %v (last=%q); pane:\n%s", wanted, last, s.tailPaneCapture())
 }
 
-// StopBroadcast POSTs /stop-broadcast to end the session cleanly.
-func (s *Session) StopBroadcast(message string) error {
-	path := "/stop-broadcast"
-	if message != "" {
-		path += "?message=" + message
+// StopBroadcast POSTs /stop-broadcast to end the session cleanly, carrying the optional
+// completion message + conclusion as a JSON body (the control handler accepts either query
+// params or a body; a body avoids URL-encoding the free-text message). This is the operator
+// path — after the ~10s flush grace vibecast POSTs a session-event `end` with these fields.
+func (s *Session) StopBroadcast(message, conclusion string) error {
+	body, err := json.Marshal(map[string]string{"message": message, "conclusion": conclusion})
+	if err != nil {
+		return err
 	}
-	_, _, err := s.control("POST", path, nil)
-	return err
+	code, resp, err := s.control("POST", "/stop-broadcast", body)
+	if err != nil {
+		return err
+	}
+	if code < 200 || code >= 300 {
+		return fmt.Errorf("stop-broadcast: HTTP %d: %s", code, string(resp))
+	}
+	return nil
 }
 
 // Teardown kills the private tmux server (which terminates vibecast and its panes).

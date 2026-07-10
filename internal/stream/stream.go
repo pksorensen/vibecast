@@ -1403,7 +1403,9 @@ func StopStream(pid int, sessionName, sessionID string, promptSharing bool, pane
 				eventData["jobId"] = jobId
 			}
 			eventBody, _ := json.Marshal(eventData)
-			http.Post(apiURL, "application/json", bytes.NewReader(eventBody))
+			if _, err := http.Post(apiURL, "application/json", bytes.NewReader(eventBody)); err != nil {
+				fmt.Fprintf(os.Stderr, "[stop] failed to post session-event end: %v\n", err)
+			}
 		}
 
 		// Mark the span as error when conclusion is not success so failures

@@ -242,6 +242,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.TransDone = false
 			return m, tea.Batch(m.Spinner.Tick, stream.StopStream(m.TtydPID, m.TmuxSession, m.SessionID, m.PromptSharing, m.Panes, m.ResumeMode, msg.Message, msg.Conclusion, msg.GitCommit, msg.GitBranch, msg.GitPushError), TransTick())
 		}
+		if m.Phase == types.PhaseStopping {
+			// A stop is already in flight: StopStream is flushing final metadata and will
+			// emit StreamStoppedMsg (→ quit) once the grace elapses. A second ControlStop —
+			// e.g. root.go's shutdown path firing after the watched tmux session ends — must
+			// be a no-op here, not an immediate quit, or the graceful shutdown is aborted
+			// mid-flush and the session-event `end` (conclusion/gitCommit) is never posted.
+			return m, nil
+		}
 		// If waiting/menu, just quit
 		return m, tea.Quit
 

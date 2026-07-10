@@ -292,10 +292,14 @@ func Execute() {
 	// Shut down
 	p.Send(types.ControlStopMsg{})
 
-	// Wait for the TUI to finish (up to 5s)
+	// Wait for the TUI to finish. The cap must exceed StopStream's graceful-shutdown grace
+	// (~10s of final metadata flush before it posts the session-event `end`), or cleanup()
+	// would tear the process down mid-flush and drop the end event. If a stop is already in
+	// flight this final ControlStop is a no-op (see update.go's PhaseStopping case) and
+	// `done` closes when StreamStoppedMsg arrives.
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 	}
 
 	cleanup()
