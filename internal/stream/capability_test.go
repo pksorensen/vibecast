@@ -2,55 +2,50 @@ package stream
 
 import "testing"
 
-func TestBuildModelFlag(t *testing.T) {
-	cases := []struct {
-		name  string
-		model string
-		tier  string
-		want  string
-	}{
-		{"unset", "", "", ""},
-		{"tier opus", "", "opus", " --model opus"},
-		{"tier sonnet", "", "sonnet", " --model sonnet"},
-		{"tier haiku", "", "haiku", " --model haiku"},
-		{"tier case-insensitive", "", "Opus", " --model opus"},
-		{"tier unknown dropped", "", "gpt-5", ""},
-		{"specific model wins over tier", "claude-opus-4-8", "sonnet", " --model 'claude-opus-4-8'"},
-		{"specific alias", "haiku", "", " --model 'haiku'"},
-		{"specific trimmed", "  opus  ", "", " --model 'opus'"},
+// TestSpecFromEnv covers the env boundary: specFromEnv reads the per-station launch
+// configuration from the environment into the agent-neutral LaunchSpec. The flag-string
+// logic itself is tested in internal/agent (claude_flags_test.go, claude_test.go).
+func TestSpecFromEnv(t *testing.T) {
+	t.Setenv("VIBECAST_CLAUDE_MODEL", "claude-opus-4-8")
+	t.Setenv("VIBECAST_CLAUDE_MODEL_TIER", "sonnet")
+	t.Setenv("VIBECAST_CLAUDE_EFFORT", "high")
+	t.Setenv("VIBECAST_APPEND_SYSTEM_PROMPT_FILE", "/tmp/sp.txt")
+	t.Setenv("VIBECAST_APPEND_SYSTEM_PROMPT", "inline")
+	t.Setenv("VIBECAST_INITIAL_PROMPT_FILE", "/tmp/ip.txt")
+
+	spec := specFromEnv()
+	if spec.Model != "claude-opus-4-8" {
+		t.Errorf("Model = %q", spec.Model)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Setenv("VIBECAST_CLAUDE_MODEL", c.model)
-			t.Setenv("VIBECAST_CLAUDE_MODEL_TIER", c.tier)
-			if got := buildModelFlag(); got != c.want {
-				t.Errorf("buildModelFlag() = %q, want %q", got, c.want)
-			}
-		})
+	if spec.ModelTier != "sonnet" {
+		t.Errorf("ModelTier = %q", spec.ModelTier)
+	}
+	if spec.Effort != "high" {
+		t.Errorf("Effort = %q", spec.Effort)
+	}
+	if spec.SystemPromptFile != "/tmp/sp.txt" {
+		t.Errorf("SystemPromptFile = %q", spec.SystemPromptFile)
+	}
+	if spec.SystemPromptInline != "inline" {
+		t.Errorf("SystemPromptInline = %q", spec.SystemPromptInline)
+	}
+	if spec.InitialPromptFile != "/tmp/ip.txt" {
+		t.Errorf("InitialPromptFile = %q", spec.InitialPromptFile)
 	}
 }
 
-func TestBuildEffortFlag(t *testing.T) {
-	cases := []struct {
-		name   string
-		effort string
-		want   string
-	}{
-		{"unset", "", ""},
-		{"low", "low", " --effort low"},
-		{"high", "high", " --effort high"},
-		{"xhigh", "xhigh", " --effort xhigh"},
-		{"max", "max", " --effort max"},
-		{"case-insensitive", "High", " --effort high"},
-		{"trimmed", "  medium  ", " --effort medium"},
-		{"unknown dropped", "ultracode", ""},
+// TestSpecFromEnvExtraPlugins verifies VIBECAST_EXTRA_PLUGINS is split on ':', trimmed,
+// and empties are skipped. (The telemetry plugin dir, prepended first, is absent in tests.)
+func TestSpecFromEnvExtraPlugins(t *testing.T) {
+	t.Setenv("VIBECAST_EXTRA_PLUGINS", "/a : /b::/c")
+	spec := specFromEnv()
+	want := []string{"/a", "/b", "/c"}
+	if len(spec.PluginDirs) != len(want) {
+		t.Fatalf("PluginDirs = %v, want %v", spec.PluginDirs, want)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Setenv("VIBECAST_CLAUDE_EFFORT", c.effort)
-			if got := buildEffortFlag(); got != c.want {
-				t.Errorf("buildEffortFlag() = %q, want %q", got, c.want)
-			}
-		})
+	for i, w := range want {
+		if spec.PluginDirs[i] != w {
+			t.Errorf("PluginDirs[%d] = %q, want %q", i, spec.PluginDirs[i], w)
+		}
 	}
 }

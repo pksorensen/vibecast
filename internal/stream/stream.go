@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/pksorensen/vibecast/internal/agent"
 	"github.com/pksorensen/vibecast/internal/auth"
 	"github.com/pksorensen/vibecast/internal/broadcast"
 	"github.com/pksorensen/vibecast/internal/control"
@@ -38,34 +39,62 @@ func logDebug(format string, args ...interface{}) {
 	}
 }
 
-func buildPluginFlags() string {
-	flags := ""
+// specFromEnv builds the agent-neutral LaunchSpec from the environment. It is the single
+// boundary where vibecast reads the per-station launch configuration; the selected agent
+// adapter turns the spec into native CLI flags.
+func specFromEnv() agent.LaunchSpec {
+	var plugins []string
 	if dir := telemetry.PluginDir(); dir != "" {
-		flags += " --plugin-dir " + dir
+		plugins = append(plugins, dir)
 	}
 	if extra := os.Getenv("VIBECAST_EXTRA_PLUGINS"); extra != "" {
 		for _, dir := range strings.Split(extra, ":") {
-			dir = strings.TrimSpace(dir)
-			if dir != "" {
-				flags += " --plugin-dir " + dir
+			if dir = strings.TrimSpace(dir); dir != "" {
+				plugins = append(plugins, dir)
 			}
 		}
 	}
-	return flags
+	return agent.LaunchSpec{
+		Model:              os.Getenv("VIBECAST_CLAUDE_MODEL"),
+		ModelTier:          os.Getenv("VIBECAST_CLAUDE_MODEL_TIER"),
+		Effort:             os.Getenv("VIBECAST_CLAUDE_EFFORT"),
+		SystemPromptFile:   os.Getenv("VIBECAST_APPEND_SYSTEM_PROMPT_FILE"),
+		SystemPromptInline: os.Getenv("VIBECAST_APPEND_SYSTEM_PROMPT"),
+		InitialPromptFile:  os.Getenv("VIBECAST_INITIAL_PROMPT_FILE"),
+		PluginDirs:         plugins,
+	}
 }
 
-func buildAppendSystemPromptFlag() string {
-	// Prefer file-based approach to avoid shell quoting issues with special chars/JSON
-	if file := os.Getenv("VIBECAST_APPEND_SYSTEM_PROMPT_FILE"); file != "" {
-		escapedPath := strings.ReplaceAll(file, "'", "'\"'\"'")
-		return " --append-system-prompt \"$(cat '" + escapedPath + "')\""
+// diagnoseInitialPromptFile emits the OTEL "initial_prompt.missing" span (plus a stderr
+// breadcrumb) when VIBECAST_INITIAL_PROMPT_FILE is set but missing or empty — the same
+// observability the inline builder produced. The command-string decision to drop the
+// positional arg lives in the agent adapter.
+func diagnoseInitialPromptFile(file string) {
+	if file == "" {
+		return
 	}
-	if prompt := os.Getenv("VIBECAST_APPEND_SYSTEM_PROMPT"); prompt != "" {
-		// Shell-escape single quotes in the prompt value
-		escaped := strings.ReplaceAll(prompt, "'", "'\"'\"'")
-		return " --append-system-prompt '" + escaped + "'"
+	info, err := os.Stat(file)
+	if err == nil && info.Size() > 0 {
+		return
 	}
-	return ""
+	_, span := telemetry.Tracer().Start(context.Background(), "vibecast.initial_prompt.missing",
+		trace.WithAttributes(
+			attribute.String("file", file),
+			attribute.Bool("file.exists", err == nil),
+		))
+	if err != nil {
+		span.SetAttributes(attribute.String("error", err.Error()))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		span.SetAttributes(attribute.Int64("file.size", info.Size()))
+		missErr := fmt.Errorf("VIBECAST_INITIAL_PROMPT_FILE points to empty file: %s", file)
+		span.RecordError(missErr)
+		span.SetStatus(codes.Error, missErr.Error())
+	}
+	span.End()
+	logDebug("[stream] VIBECAST_INITIAL_PROMPT_FILE=%s missing or empty (err=%v) — dropping --prompt arg\n", file, err)
+	fmt.Fprintf(os.Stderr, "[initial-prompt-missing] file=%s exists=%t\n", file, err == nil)
 }
 
 // readAppendSystemPrompt returns the raw system prompt text for logging purposes.
@@ -79,53 +108,6 @@ func readAppendSystemPrompt() string {
 		return strings.TrimSpace(prompt)
 	}
 	return ""
-}
-
-// buildInitialPromptArg returns a shell fragment that passes the initial job prompt as
-// a positional argument to Claude. The prompt is read from the file path set in
-// VIBECAST_INITIAL_PROMPT_FILE so that arbitrary multi-line content is handled safely
-// without shell-escaping or tmux send-keys timing issues.
-//
-// NOTE: passing a positional argument to claude starts interactive mode with that text
-// as the first user message. It is NOT the same as -p (print mode). -p causes Claude
-// to exit after responding; a positional arg keeps Claude interactive.
-//
-// Defensive: if the env var points to a missing or empty file we DROP the argument
-// instead of producing `"$(cat 'missing')"` (which silently expands to ""). That used
-// to give Claude an empty positional arg and land it on the welcome screen with no
-// task — looked identical to "claude is fine, just waiting for input." Now we emit
-// a vibecast.initial_prompt.missing span event so the misconfig is visible in OTEL.
-func buildInitialPromptArg() string {
-	file := os.Getenv("VIBECAST_INITIAL_PROMPT_FILE")
-	if file == "" {
-		return ""
-	}
-	info, err := os.Stat(file)
-	if err != nil || info.Size() == 0 {
-		_, span := telemetry.Tracer().Start(context.Background(), "vibecast.initial_prompt.missing",
-			trace.WithAttributes(
-				attribute.String("file", file),
-				attribute.Bool("file.exists", err == nil),
-			))
-		if err != nil {
-			span.SetAttributes(attribute.String("error", err.Error()))
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		} else {
-			span.SetAttributes(attribute.Int64("file.size", info.Size()))
-			missErr := fmt.Errorf("VIBECAST_INITIAL_PROMPT_FILE points to empty file: %s", file)
-			span.RecordError(missErr)
-			span.SetStatus(codes.Error, missErr.Error())
-		}
-		span.End()
-		logDebug("[stream] VIBECAST_INITIAL_PROMPT_FILE=%s missing or empty (err=%v) — dropping --prompt arg\n", file, err)
-		fmt.Fprintf(os.Stderr, "[initial-prompt-missing] file=%s exists=%t\n", file, err == nil)
-		return ""
-	}
-	// Shell-escape single quotes in the file path
-	escapedPath := strings.ReplaceAll(file, "'", "'\"'\"'")
-	// "$(cat 'path')" expands to file content as a single argument, preserving newlines.
-	return " \"$(cat '" + escapedPath + "')\""
 }
 
 // resolveWorkDir returns the directory Claude should start in.
@@ -144,59 +126,6 @@ func resolveWorkDir() string {
 		return strings.TrimSpace(string(gitRoot))
 	}
 	return ""
-}
-
-// claudeSessionIDFlag returns " --session-id <id>" only when id is a valid UUIDv4.
-// Claude rejects non-UUID values and exits immediately — passing vibecast's 8-char
-// session id here used to kill the pane silently (see auth_recovery incident).
-func claudeSessionIDFlag(sessionID string) string {
-	if sessionID == "" {
-		return ""
-	}
-	if !util.IsUUIDv4(sessionID) {
-		logDebug("[claude-cmd] dropping --session-id %q: not a UUIDv4\n", sessionID)
-		return ""
-	}
-	return " --session-id " + sessionID
-}
-
-// validModelTiers are the model family aliases vibecast knows how to map to `claude --model`.
-// They double as valid --model aliases, so the mapping is identity for known tiers.
-var validModelTiers = map[string]bool{"haiku": true, "sonnet": true, "opus": true}
-
-// validEfforts are the effort levels Claude Code accepts (claude --effort <level>).
-var validEfforts = map[string]bool{"low": true, "medium": true, "high": true, "xhigh": true, "max": true}
-
-// buildModelFlag maps the per-station model config to a `claude --model` flag. vibecast owns
-// this mapping (operator responsibility): a specific model id (VIBECAST_CLAUDE_MODEL) wins when
-// set — passed through for the running provider to honor or reject — otherwise the family tier
-// (VIBECAST_CLAUDE_MODEL_TIER) is mapped to its alias. Unknown/empty → no flag (Claude default).
-func buildModelFlag() string {
-	if model := strings.TrimSpace(os.Getenv("VIBECAST_CLAUDE_MODEL")); model != "" {
-		escaped := strings.ReplaceAll(model, "'", "'\"'\"'")
-		return " --model '" + escaped + "'"
-	}
-	if tier := strings.ToLower(strings.TrimSpace(os.Getenv("VIBECAST_CLAUDE_MODEL_TIER"))); tier != "" {
-		if validModelTiers[tier] {
-			return " --model " + tier
-		}
-		logDebug("[claude-cmd] dropping VIBECAST_CLAUDE_MODEL_TIER=%q: unknown tier\n", tier)
-	}
-	return ""
-}
-
-// buildEffortFlag maps VIBECAST_CLAUDE_EFFORT to `claude --effort <level>`. An unknown value is
-// dropped (Claude would warn and fall back to default anyway); empty → no flag.
-func buildEffortFlag() string {
-	effort := strings.ToLower(strings.TrimSpace(os.Getenv("VIBECAST_CLAUDE_EFFORT")))
-	if effort == "" {
-		return ""
-	}
-	if !validEfforts[effort] {
-		logDebug("[claude-cmd] dropping VIBECAST_CLAUDE_EFFORT=%q: not in low|medium|high|xhigh|max\n", effort)
-		return ""
-	}
-	return " --effort " + effort
 }
 
 // claudeUpdateOnce guarantees the update/pin runs at most once per vibecast
@@ -278,32 +207,6 @@ func ensureClaudeUpToDate(claudePath string) {
 	})
 }
 
-func buildClaudeCommand(claudePath string, sessionID string) string {
-	cmd := claudePath + " --dangerously-skip-permissions"
-	cmd += buildPluginFlags()
-	cmd += buildModelFlag()
-	cmd += buildEffortFlag()
-	cmd += buildAppendSystemPromptFlag()
-	cmd += buildInitialPromptArg()
-	cmd += claudeSessionIDFlag(sessionID)
-	return cmd
-}
-
-func buildClaudeResumeCommand(claudePath string, sessionID string) string {
-	pluginFlags := buildPluginFlags()
-	modelFlag := buildModelFlag()
-	effortFlag := buildEffortFlag()
-	promptFlag := buildAppendSystemPromptFlag()
-	initialPrompt := buildInitialPromptArg()
-	if sessionID != "" && util.IsUUIDv4(sessionID) {
-		return claudePath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + promptFlag + " --resume " + sessionID + initialPrompt
-	}
-	if sessionID != "" {
-		logDebug("[claude-cmd] dropping --resume %q: not a UUIDv4, falling back to --continue\n", sessionID)
-	}
-	return claudePath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + promptFlag + " --continue" + initialPrompt
-}
-
 // DoRestartClaude performs the actual restart logic.
 // Kills the existing Claude process and respawns the pane with a fresh Claude.
 func DoRestartClaude(sessionName string, resume bool, claudeSessionID string, paneId ...string) error {
@@ -330,18 +233,30 @@ func DoRestartClaude(sessionName string, resume bool, claudeSessionID string, pa
 		return err
 	}
 
-	claudePath, err := exec.LookPath("claude")
+	ad, err := agent.Selected()
 	if err != nil {
-		logDebug("[restart] claude not found: %v\n", err)
-		return fail(fmt.Errorf("claude not found: %w", err))
+		return fail(err)
 	}
-	ensureClaudeUpToDate(claudePath)
+	binPath, err := exec.LookPath(ad.BinaryName())
+	if err != nil {
+		logDebug("[restart] %s not found: %v\n", ad.BinaryName(), err)
+		return fail(fmt.Errorf("%s not found: %w", ad.BinaryName(), err))
+	}
+	if ad.Kind() == agent.KindClaude {
+		ensureClaudeUpToDate(binPath)
+	}
 
+	spec := specFromEnv()
+	diagnoseInitialPromptFile(spec.InitialPromptFile)
 	var newCmd string
 	if resume && claudeSessionID != "" {
-		newCmd = buildClaudeResumeCommand(claudePath, claudeSessionID)
+		newCmd, err = ad.BuildResumeCommand(binPath, spec, claudeSessionID)
 	} else {
-		newCmd = buildClaudeCommand(claudePath, claudeSessionID)
+		spec.AgentSessionID = claudeSessionID
+		newCmd, err = ad.BuildCommand(binPath, spec)
+	}
+	if err != nil {
+		return fail(err)
 	}
 
 	// cd to the job work dir (or git root if no isolation env var is set)
@@ -570,17 +485,30 @@ func SpawnPane(sessionName, sessionID, paneId, name string, status *types.Shared
 	}
 	logDebug("[pane:%s] claude session ID: %s (resume=%v)\n", paneId, claudeSessionID, claudeResumeID != "")
 
+	ad, err := agent.Selected()
+	if err != nil {
+		return nil, err
+	}
+
 	// Build the command to run directly in the tmux window (no shell prompt visible)
 	var windowCmd string
-	claudePath, err := exec.LookPath("claude")
-	if err != nil {
-		windowCmd = "echo 'Welcome to Agentic Live! Claude Code not found - using bash.' && exec bash"
+	binPath, lookErr := exec.LookPath(ad.BinaryName())
+	if lookErr != nil {
+		windowCmd = "echo 'Welcome to Agentic Live! " + ad.BinaryName() + " not found - using bash.' && exec bash"
 	} else {
-		ensureClaudeUpToDate(claudePath)
+		if ad.Kind() == agent.KindClaude {
+			ensureClaudeUpToDate(binPath)
+		}
+		spec := specFromEnv()
+		diagnoseInitialPromptFile(spec.InitialPromptFile)
 		if claudeResumeID != "" {
-			windowCmd = buildClaudeResumeCommand(claudePath, claudeResumeID)
+			windowCmd, err = ad.BuildResumeCommand(binPath, spec, claudeResumeID)
 		} else {
-			windowCmd = buildClaudeCommand(claudePath, claudeSessionID)
+			spec.AgentSessionID = claudeSessionID
+			windowCmd, err = ad.BuildCommand(binPath, spec)
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
 
