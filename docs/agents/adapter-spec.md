@@ -153,6 +153,11 @@ type LaunchSpec struct {
     SystemPromptFile   string // station prompt file (VIBECAST_APPEND_SYSTEM_PROMPT_FILE)
     SystemPromptInline string // inline variant (VIBECAST_APPEND_SYSTEM_PROMPT) — both live today
     InitialPromptFile  string
+    JobMode            bool   // AGENTICS_JOB_MODE=1 — unattended job. Distinct from PermissionMode
+                              // (below): this gates the COMPLETION contract, not the permission
+                              // bypass. codex injects its stop_broadcast developer_instructions
+                              // mandate only when set (see research/codex.md §mcp); claude relies
+                              // on the Stop-hook enforcement instead, so its adapter ignores it.
     PermissionMode     PermissionMode
     ExtraArgs          []string // opaque passthrough (VIBECAST_AGENT_EXTRA_ARGS; claude's
                                 // --dangerously-load-development-channels rides here via

@@ -1115,6 +1115,9 @@ func handleHookStop() {
 
 		sockPath := control.ControlSocketPath()
 		statusBody, err := control.ControlHTTPRequest(sockPath, "GET", "/status")
+		if err != nil {
+			util.DebugLog("[stop-enforce] status probe failed sock=%s err=%v — letting exit proceed", sockPath, err)
+		}
 		if err == nil {
 			var statusResp struct {
 				Phase string `json:"phase"`
@@ -1122,6 +1125,7 @@ func handleHookStop() {
 			if json.Unmarshal([]byte(statusBody), &statusResp) == nil && statusResp.Phase == "live" {
 				// stop_broadcast has not been called yet
 				count := readStopBlockCount(sf.SessionID)
+				util.DebugLog("[stop-enforce] phase=live, stop_broadcast not called, blockCount=%d", count)
 				if count < 2 {
 					writeStopBlockCount(sf.SessionID, count+1)
 					reason := "Before finishing, you must call the stop_broadcast MCP tool to finalize the session.\n\n" +
@@ -1140,11 +1144,14 @@ func handleHookStop() {
 					os.Exit(2)
 				}
 				// Fallback after 2 blocked attempts: auto-call stop_broadcast as "incomplete"
+				util.DebugLog("[stop-enforce] blockCount>=2, auto-calling stop_broadcast conclusion=incomplete")
 				stopPayload, _ := json.Marshal(map[string]string{
 					"conclusion": "incomplete",
 					"message":    "Session ended without explicit stop_broadcast call",
 				})
 				control.ControlHTTPRequestWithBody(sockPath, "POST", "/stop-broadcast", stopPayload)
+			} else {
+				util.DebugLog("[stop-enforce] phase!=live (or unparseable): body=%q — stop_broadcast already handled, exit clean", statusBody)
 			}
 		}
 	}

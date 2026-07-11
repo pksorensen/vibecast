@@ -105,6 +105,18 @@ func prepareCodexConfig(baseDir, workspace, vibecastBin string) (map[string]stri
 		esc = strings.ReplaceAll(esc, `"`, `\"`)
 		fmt.Fprintf(&toml, "\n[projects.\"%s\"]\ntrust_level = \"trusted\"\n", esc)
 	}
+
+	// Register the vibecast MCP server so codex can call stop_broadcast (the job-completion
+	// conclusion path — C07). Unlike claude (which inherits the pane env for its plugin MCP),
+	// codex sanitizes the MCP subprocess env, so VIBECAST_HOME must be forwarded explicitly.
+	// This mirrors what vibecast's launch path will write into codex's config in production;
+	// VIBECAST_HOME is the same baseDir/home Launch exports to the pane.
+	if vibecastBin != "" {
+		vibecastHome := filepath.Join(baseDir, "home")
+		mcpEnv := map[string]string{"VIBECAST_HOME": vibecastHome}
+		toml.WriteString(agent.CodexMCPServersTOML(vibecastBin, mcpEnv))
+	}
+
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(toml.String()), 0o600); err != nil {
 		return nil, err
 	}

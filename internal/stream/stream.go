@@ -62,6 +62,7 @@ func specFromEnv() agent.LaunchSpec {
 		SystemPromptInline: os.Getenv("VIBECAST_APPEND_SYSTEM_PROMPT"),
 		InitialPromptFile:  os.Getenv("VIBECAST_INITIAL_PROMPT_FILE"),
 		PluginDirs:         plugins,
+		JobMode:            os.Getenv("AGENTICS_JOB_MODE") == "1",
 	}
 }
 

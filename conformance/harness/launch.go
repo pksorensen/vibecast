@@ -425,6 +425,14 @@ func (s *Session) Diagnostics() string {
 	} else {
 		fmt.Fprintf(&b, "(no session file: %v)\n", err)
 	}
+	// For codex, print the rollout transcript (what the model actually said + which tools it
+	// called). This is the ground-truth for completion-signal failures: whether the model saw
+	// an injected Stop-block reason and whether it ever issued a tool call. Emitted BEFORE the
+	// tmux section because that section early-returns when the server is already torn down.
+	if s.cfg.Agent == "codex" {
+		fmt.Fprintf(&b, "── codex rollout transcript ──\n")
+		b.WriteString(codexRolloutDump(filepath.Join(s.cfg.BaseDir, "codex-home")))
+	}
 	fmt.Fprintf(&b, "── tmux panes on %s ──\n", s.TmuxSock)
 	list, err := exec.Command("tmux", "-S", s.TmuxSock, "list-panes", "-a",
 		"-F", "#{session_name}:#{window_index}.#{pane_index} [#{pane_current_command}] dead=#{pane_dead}").Output()
@@ -442,6 +450,88 @@ func (s *Session) Diagnostics() string {
 		b.Write(out)
 	}
 	return b.String()
+}
+
+// codexRolloutDump reads the newest rollout JSONL under <codexHome>/sessions and renders a
+// compact transcript: user/assistant messages, reasoning summaries, and function_call names.
+// Codex records the full conversation there (verified schema in docs/agents/research/codex.md);
+// it is the only place to see whether an injected Stop-block reason reached the model.
+func codexRolloutDump(codexHome string) string {
+	matches, _ := filepath.Glob(filepath.Join(codexHome, "sessions", "*", "*", "*", "rollout-*.jsonl"))
+	if len(matches) == 0 {
+		return "(no rollout files found under " + codexHome + "/sessions)\n"
+	}
+	sort.Strings(matches) // rollout filenames are timestamp-prefixed → last is newest
+	newest := matches[len(matches)-1]
+	raw, err := os.ReadFile(newest)
+	if err != nil {
+		return fmt.Sprintf("(read rollout %s: %v)\n", newest, err)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "(%s)\n", newest)
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var rec struct {
+			Type    string `json:"type"`
+			Payload struct {
+				Type    string          `json:"type"`
+				Role    string          `json:"role"`
+				Name    string          `json:"name"`
+				Content json.RawMessage `json:"content"`
+				Message string          `json:"message"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(line, &rec) != nil {
+			continue
+		}
+		switch rec.Type {
+		case "response_item":
+			switch rec.Payload.Type {
+			case "message":
+				fmt.Fprintf(&b, "  [%s] %s\n", rec.Payload.Role, truncate(flattenCodexContent(rec.Payload.Content), 400))
+			case "function_call":
+				fmt.Fprintf(&b, "  [tool-call] %s\n", rec.Payload.Name)
+			case "function_call_output":
+				fmt.Fprintf(&b, "  [tool-output] (present)\n")
+			}
+		case "event_msg":
+			switch rec.Payload.Type {
+			case "agent_message", "user_message":
+				if rec.Payload.Message != "" {
+					fmt.Fprintf(&b, "  [%s] %s\n", rec.Payload.Type, truncate(rec.Payload.Message, 400))
+				}
+			}
+		}
+	}
+	return b.String()
+}
+
+// flattenCodexContent joins an OpenAI responses-format content array ([{type,text}]) into one
+// string; falls back to the raw JSON if it isn't the expected shape.
+func flattenCodexContent(raw json.RawMessage) string {
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) == nil {
+		var sb strings.Builder
+		for _, p := range parts {
+			sb.WriteString(p.Text)
+		}
+		if sb.Len() > 0 {
+			return sb.String()
+		}
+	}
+	return string(raw)
+}
+
+func truncate(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 func splitNonEmpty(s string) []string {

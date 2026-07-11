@@ -2,7 +2,9 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/pksorensen/vibecast/internal/util"
@@ -42,28 +44,64 @@ type codexAdapter struct{}
 // hooks.json loads non-interactively. Hook-trust only — NOT the sandbox/approval bypass.
 const codexHookTrustFlag = " --dangerously-bypass-hook-trust"
 
+// codexMCPToolExposureFlags forces vibecast's MCP tools to be exposed directly in the model's
+// toolset instead of being hidden behind codex's tool_search meta-tool.
+//
+// Codex 0.142.x ships two enabled features — tool_search_always_defer_mcp_tools and
+// tool_suggest — that DEFER MCP-server tools: the tools are loaded and reachable, but the
+// model sees only a `tool_search.tool_search_tool` and must "search" to surface them. gpt-5.5
+// searches unreliably, so vibecast's completion-signal tools (stop_broadcast — the C07 path)
+// were invoked only sometimes, and the model would report "the tool is not available in this
+// session." Disabling BOTH features (neither alone suffices) puts vibecast/<tool> back in the
+// direct toolset. -c dotted overrides are used (not a config.toml [features] table) so they
+// compose cleanly with any real user config, which may already carry a [features] section.
+//
+// Trade-off: this opts vibecast-launched codex out of the large-toolset context optimization.
+// For vibecast's ~10 MCP tools plus codex builtins that is negligible and buys deterministic
+// tool-calling, which the Operator contract requires. See docs/agents/research/codex.md and
+// the C07 conformance scenario.
+const codexMCPToolExposureFlags = " -c features.tool_suggest=false -c features.tool_search_always_defer_mcp_tools=false"
+
+// codexJobModeInstructions is a developer-instructions preamble carried by every
+// vibecast-launched codex running in job mode (AGENTICS_JOB_MODE=1 → LaunchSpec.JobMode). It
+// bridges codex's tool model to vibecast's Operator completion contract: the job is done only
+// when the agent calls the stop_broadcast MCP tool with a conclusion.
+//
+// Empirically load-bearing (conformance C07). With the vibecast MCP server registered and its
+// tools exposed directly (codexMCPToolExposureFlags), a bare "call stop_broadcast now" user
+// prompt still made gpt-5.5 call the tool 0/5 times — it silently finished, and sometimes
+// reported the tool "is not available." Prepending this mandate to developer_instructions made
+// it 5/5. The tool_search language is a defensive fallback: if a codex version/flag-state does
+// defer the tool behind the tool_search meta-tool, this tells the model to load it first
+// rather than declaring it unavailable.
+//
+// Job-mode-gated on purpose: mandating stop_broadcast in an interactive broadcast would end
+// the stream after the first task. Kept ASCII-only (no quote/$/backslash/backtick/!) so it
+// rides safely inside BOTH the single-quoted and double-quoted shell forms below.
+const codexJobModeInstructions = "VIBECAST JOB MODE. This is an unattended broadcast job. Your broadcast lifecycle tools (stop_broadcast, get_broadcast_status, and related controls) are provided by the vibecast MCP server. Codex may defer MCP-server tools behind the tool_search tool rather than listing them directly; if a tool such as stop_broadcast is not in your visible tool list, call tool_search to load it first, then call it. When the job is complete, your final action MUST be to call stop_broadcast with a conclusion (for example conclusion=success) and a one-line summary message. Never end the session, and never report that stop_broadcast is unavailable, without first calling it or using tool_search to load it."
+
 func (codexAdapter) Kind() Kind                  { return KindCodex }
 func (codexAdapter) BinaryName() string          { return "codex" }
 func (codexAdapter) DiscoversOwnSessionID() bool { return true }
 
 func (codexAdapter) BuildCommand(binPath string, spec LaunchSpec) (string, error) {
-	cmd := binPath + codexHookTrustFlag
+	cmd := binPath + codexHookTrustFlag + codexMCPToolExposureFlags
 	cmd += codexModelFlag(spec.Model, spec.ModelTier)
-	cmd += codexDeveloperInstructionsFlag(spec.SystemPromptFile, spec.SystemPromptInline)
+	cmd += codexDeveloperInstructionsFlag(spec.SystemPromptFile, spec.SystemPromptInline, spec.JobMode)
 	cmd += codexInitialPromptArg(spec.InitialPromptFile)
 	return cmd, nil
 }
 
 func (codexAdapter) BuildResumeCommand(binPath string, spec LaunchSpec, agentSessionID string) (string, error) {
-	devInstr := codexDeveloperInstructionsFlag(spec.SystemPromptFile, spec.SystemPromptInline)
+	devInstr := codexDeveloperInstructionsFlag(spec.SystemPromptFile, spec.SystemPromptInline, spec.JobMode)
 	initialPrompt := codexInitialPromptArg(spec.InitialPromptFile)
 	if agentSessionID != "" && util.IsUUID(agentSessionID) {
-		return binPath + " resume" + codexHookTrustFlag + devInstr + " " + agentSessionID + initialPrompt, nil
+		return binPath + " resume" + codexHookTrustFlag + codexMCPToolExposureFlags + devInstr + " " + agentSessionID + initialPrompt, nil
 	}
 	if agentSessionID != "" {
 		logDebug("[codex-cmd] dropping resume %q: not a UUID, falling back to --last\n", agentSessionID)
 	}
-	return binPath + " resume" + codexHookTrustFlag + devInstr + " --last" + initialPrompt, nil
+	return binPath + " resume" + codexHookTrustFlag + codexMCPToolExposureFlags + devInstr + " --last" + initialPrompt, nil
 }
 
 // codexModelFlag maps the per-station model config to `codex -m <model>`. Codex model names
@@ -92,15 +130,35 @@ func codexModelFlag(model, tier string) string {
 // claudeAppendSystemPromptFlag; no Go-side escaping is needed. (Edge case: a prompt that is
 // itself a single valid TOML token — e.g. exactly `true` or `"x"` — would be TOML-coerced;
 // real station prompts are always multi-word prose and never are.)
-func codexDeveloperInstructionsFlag(file, inline string) string {
+//
+// In job mode (jobMode) the codexJobModeInstructions mandate is PREPENDED to whatever station
+// prompt is present. Both ride in the single -c developer_instructions override — a second -c
+// developer_instructions would clobber (last dotted override wins), not merge — so the mandate
+// and the station prose are concatenated into one value, separated by a blank line. The
+// mandate is ASCII-only, so it is literal inside both the double-quoted (file) and
+// single-quoted (inline/mandate-only) shell forms.
+func codexDeveloperInstructionsFlag(file, inline string, jobMode bool) string {
+	preamble := ""
+	if jobMode {
+		preamble = codexJobModeInstructions
+	}
 	// Prefer file-based (avoids shell quoting issues with special chars/JSON), matching claude.
 	if file != "" {
 		escapedPath := strings.ReplaceAll(file, "'", "'\"'\"'")
+		if preamble != "" {
+			return " -c developer_instructions=\"" + preamble + "\n\n$(cat '" + escapedPath + "')\""
+		}
 		return " -c developer_instructions=\"$(cat '" + escapedPath + "')\""
 	}
 	if inline != "" {
 		escaped := strings.ReplaceAll(inline, "'", "'\"'\"'")
+		if preamble != "" {
+			return " -c developer_instructions='" + preamble + "\n\n" + escaped + "'"
+		}
 		return " -c developer_instructions='" + escaped + "'"
+	}
+	if preamble != "" {
+		return " -c developer_instructions='" + preamble + "'"
 	}
 	return ""
 }
@@ -157,4 +215,63 @@ func CodexHooksJSON(vibecastBin string) []byte {
 	}
 	out, _ := json.MarshalIndent(map[string]any{"hooks": hooks}, "", "  ")
 	return out
+}
+
+// CodexMCPServersTOML returns the config.toml fragment that registers the vibecast MCP
+// server (`<bin> mcp serve`) with codex, to be appended to CODEX_HOME/config.toml.
+//
+// Two codex-specific differences from claude's plugin .mcp.json, both verified empirically
+// against codex-cli 0.142.5, both load-bearing:
+//
+//  1. Explicit env forwarding. Claude inherits the pane's environment for its plugin MCP
+//     server, so it resolves the control socket from VIBECAST_HOME with no extra wiring.
+//     Codex sanitizes the MCP subprocess environment down to ~9 base vars (PATH, HOME, PWD,
+//     …), dropping every VIBECAST_* the pane exported — confirmed with an env-dumping probe
+//     server. So the env the server needs (at minimum VIBECAST_HOME, which resolves
+//     $VIBECAST_HOME/.vibecast/control.sock) MUST be re-declared in this `env` table; codex
+//     forwards exactly the keys listed here and nothing else. Omit it and every tool call
+//     fails with "control server unavailable".
+//
+//  2. default_tools_approval_mode = "approve". In the interactive TUI, codex gates EVERY MCP
+//     tool call behind an "Allow the vibecast MCP server to run tool …" dialog. vibecast runs
+//     unattended (job mode), so an unanswered dialog stalls the whole session. Claude's
+//     --dangerously-skip-permissions auto-approves all its tools; this is the codex analog,
+//     scoped to vibecast's OWN control-plane MCP tools (stop_broadcast, restart_claude, …) —
+//     the agent signalling lifecycle back to vibecast, not doing work in the workspace. It is
+//     NOT the sandbox/approval bypass: the agent's shell + apply_patch calls stay gated by
+//     sandbox=workspace-write + approval=on-request + the PreToolUse guard hook. That guard
+//     floor is exactly what --dangerously-bypass-approvals-and-sandbox would remove, and this
+//     never touches it.
+//
+// env keys are emitted sorted for deterministic output (golden-test stable). An empty env
+// map omits the `env` line entirely.
+func CodexMCPServersTOML(vibecastBin string, env map[string]string) string {
+	var b strings.Builder
+	b.WriteString("\n[mcp_servers.vibecast]\n")
+	fmt.Fprintf(&b, "command = %s\n", tomlBasicString(vibecastBin))
+	b.WriteString("args = [\"mcp\", \"serve\"]\n")
+	if len(env) > 0 {
+		keys := make([]string, 0, len(env))
+		for k := range env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s = %s", k, tomlBasicString(env[k])))
+		}
+		fmt.Fprintf(&b, "env = { %s }\n", strings.Join(parts, ", "))
+	}
+	// Auto-approve vibecast's own control tools (never the workspace sandbox — see doc above).
+	b.WriteString("default_tools_approval_mode = \"approve\"\n")
+	return b.String()
+}
+
+// tomlBasicString wraps s as a TOML basic string, escaping backslash and double-quote (the
+// only two characters that can break out of a quoted value for the filesystem paths and env
+// values we emit). Mirrors the quoted-key escaping used for project trust entries.
+func tomlBasicString(s string) string {
+	esc := strings.ReplaceAll(s, `\`, `\\`)
+	esc = strings.ReplaceAll(esc, `"`, `\"`)
+	return `"` + esc + `"`
 }

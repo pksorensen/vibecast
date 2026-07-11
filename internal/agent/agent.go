@@ -39,6 +39,7 @@ type LaunchSpec struct {
 	SystemPromptInline string   // VIBECAST_APPEND_SYSTEM_PROMPT
 	InitialPromptFile  string   // VIBECAST_INITIAL_PROMPT_FILE
 	PluginDirs         []string // claude --plugin-dir list (telemetry plugin dir + VIBECAST_EXTRA_PLUGINS)
+	JobMode            bool     // AGENTICS_JOB_MODE=1 — unattended job; the completion signal (stop_broadcast) is the contract
 }
 
 // Adapter is the pluggable coding-agent seam.

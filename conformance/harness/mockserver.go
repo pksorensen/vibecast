@@ -281,7 +281,14 @@ func (m *MockServer) Dump() string {
 	fmt.Fprintf(&b, "── mock recorded: %d session-events, %d metadata POSTs, %d WS text frames, %d broadcast conns, %d binary frames ──\n",
 		len(m.sessionEvents), len(m.metadataPosts), len(m.metaFrames), len(m.broadcastConns), m.binaryFrames)
 	for _, e := range m.sessionEvents {
-		fmt.Fprintf(&b, "  session-event: event=%v sessionId=%v\n", e.Decoded["event"], e.Decoded["sessionId"])
+		fmt.Fprintf(&b, "  session-event: event=%v sessionId=%v", e.Decoded["event"], e.Decoded["sessionId"])
+		if c, ok := e.Decoded["conclusion"]; ok {
+			fmt.Fprintf(&b, " conclusion=%v", c)
+		}
+		if j, ok := e.Decoded["jobId"]; ok {
+			fmt.Fprintf(&b, " jobId=%v", j)
+		}
+		b.WriteByte('\n')
 	}
 	for _, p := range m.metadataPosts {
 		fmt.Fprintf(&b, "  metadata POST: subtype=%v sessionId=%v\n", p.Decoded["subtype"], p.Decoded["sessionId"])

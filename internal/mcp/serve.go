@@ -22,6 +22,7 @@ import (
 	"github.com/pksorensen/vibecast/internal/hooks"
 	"github.com/pksorensen/vibecast/internal/session"
 	"github.com/pksorensen/vibecast/internal/types"
+	"github.com/pksorensen/vibecast/internal/util"
 )
 
 // skipDirs are directory names to exclude from workspace zips.
@@ -146,6 +147,13 @@ func HandleMCPServe() {
 
 	selectedStreamID := os.Getenv("VIBECAST_SESSION_ID")
 
+	// Env-gated wire tracing for diagnosing MCP-client interop (e.g. codex's rmcp): logs each
+	// received JSON-RPC method + id to the shared debug log. Off unless VIBECAST_MCP_DEBUG set.
+	mcpDebug := os.Getenv("VIBECAST_MCP_DEBUG") != ""
+	if mcpDebug {
+		util.DebugLog("[mcp-serve] started pid=%d selectedStream=%q", os.Getpid(), selectedStreamID)
+	}
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -154,7 +162,13 @@ func HandleMCPServe() {
 
 		var req types.JsonrpcRequest
 		if err := json.Unmarshal(line, &req); err != nil {
+			if mcpDebug {
+				util.DebugLog("[mcp-serve] unmarshal err=%v raw=%.200q", err, string(line))
+			}
 			continue
+		}
+		if mcpDebug {
+			util.DebugLog("[mcp-serve] recv method=%s id=%v", req.Method, req.ID)
 		}
 
 		var resp *types.JsonrpcResponse
@@ -181,11 +195,15 @@ func HandleMCPServe() {
 			continue
 
 		case "tools/list":
+			tools := mcpToolsList()
+			if mcpDebug {
+				util.DebugLog("[mcp-serve] tools/list -> %d tools", len(tools))
+			}
 			resp = &types.JsonrpcResponse{
 				JSONRPC: "2.0",
 				ID:      parseID(req.ID),
 				Result: map[string]interface{}{
-					"tools": mcpToolsList(),
+					"tools": tools,
 				},
 			}
 
