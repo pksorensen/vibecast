@@ -47,6 +47,8 @@ func prepareAgentConfig(agent, baseDir, workspace, vibecastBin string) (map[stri
 		return prepareClaudeConfig(baseDir, workspace)
 	case "codex":
 		return prepareCodexConfig(baseDir, workspace, vibecastBin)
+	case "pi":
+		return preparePiConfig(baseDir, workspace, vibecastBin)
 	default:
 		return nil, nil
 	}
@@ -131,6 +133,44 @@ func prepareCodexConfig(baseDir, workspace, vibecastBin string) (map[string]stri
 	}
 
 	return map[string]string{"CODEX_HOME": cfgDir}, nil
+}
+
+// preparePiConfig builds an isolated PI_CODING_AGENT_DIR under baseDir and writes vibecast's pi
+// hook-bridge extension into its extensions/ dir, where pi auto-discovers it. pi 0.73.1 has no
+// first-run trust/onboarding dialog (goes straight to the editor), so — unlike claude/codex —
+// there is nothing to pre-trust; the isolation is purely so the run never touches the real
+// ~/.pi/agent (auth, sessions, settings) and startup is deterministic.
+//
+// The returned env reaches the pi process (and thus the extension): PI_CODING_AGENT_DIR relocates
+// pi's whole config home; VIBECAST_BIN tells the extension which binary to exec for `vibecast hook
+// <sub>`; PI_SKIP_VERSION_CHECK + PI_OFFLINE keep startup free of network (version check + fd/ripgrep
+// helper downloads) without affecting the model call (verified: `pi --offline` still reached the
+// Foundry model). Real-mode model wiring (models.json → pks-foundry proxy) lands with the scenarios
+// that need a model response; C01/C02 registration fire at launch and need none.
+func preparePiConfig(baseDir, workspace, vibecastBin string) (map[string]string, error) {
+	cfgDir := filepath.Join(baseDir, "pi-home")
+	extDir := filepath.Join(cfgDir, "extensions")
+	if err := os.MkdirAll(extDir, 0o755); err != nil {
+		return nil, err
+	}
+
+	// Auto-discovered hook bridge: $PI_CODING_AGENT_DIR/extensions/vibecast.ts (embedded in the
+	// vibecast binary). Requires the binary path so the extension can exec `vibecast hook`.
+	if vibecastBin != "" {
+		if err := os.WriteFile(filepath.Join(extDir, agent.PiExtensionFileName), agent.PiExtensionTS(), 0o644); err != nil {
+			return nil, err
+		}
+	}
+
+	env := map[string]string{
+		"PI_CODING_AGENT_DIR":   cfgDir,
+		"PI_SKIP_VERSION_CHECK": "1",
+		"PI_OFFLINE":            "1",
+	}
+	if vibecastBin != "" {
+		env["VIBECAST_BIN"] = vibecastBin
+	}
+	return env, nil
 }
 
 // prepareClaudeConfig builds an isolated CLAUDE_CONFIG_DIR under baseDir that is a copy of
