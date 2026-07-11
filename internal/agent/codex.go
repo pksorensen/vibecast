@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -145,6 +146,107 @@ func (codexAdapter) BuildResumeCommand(binPath string, spec LaunchSpec, agentSes
 		logDebug("[codex-cmd] dropping resume %q: not a UUID, falling back to --last\n", agentSessionID)
 	}
 	return binPath + " resume" + codexHookTrustFlag + codexMCPToolExposureFlags + codexPluginDisableFlag + codexSandboxFlag + devInstr + " --last" + initialPrompt, nil
+}
+
+// codexHomeIsVibecastSeeded reports whether dir already carries vibecast's MCP wiring
+// (a config.toml with the [mcp_servers.vibecast] table). True means the config home was
+// already provisioned by vibecast — either the conformance harness's host-side seed
+// (prepareCodexConfig) or a prior Prepare in this same process (restart). Prepare then reuses
+// it verbatim instead of re-seeding, which (a) makes Prepare idempotent and (b) keeps the
+// 33/33-green conformance harness unperturbed: the harness always points CODEX_HOME at a dir
+// it has already seeded, so Prepare detects it and no-ops rather than building a second home.
+func codexHomeIsVibecastSeeded(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "config.toml"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "[mcp_servers.vibecast]")
+}
+
+// Prepare seeds an isolated CODEX_HOME so a vibecast-launched codex fires the vibecast
+// lifecycle hooks (SessionStart discover-identity, PreToolUse guard, …), can call the vibecast
+// MCP tools (stop_broadcast — the C07 completion path), and trusts the work dir without a
+// folder-trust prompt. It is the production analog of the conformance harness's host-side
+// prepareCodexConfig; both share the CodexHooksJSON / CodexMCPServersTOML generators.
+//
+// The real codex config dir is CODEX_HOME (else ~/.codex). If that already carries vibecast's
+// MCP wiring (codexHomeIsVibecastSeeded) — the harness pre-seeds it, and a same-process restart
+// re-enters here — Prepare returns it unchanged (no re-copy, no double trust/MCP append).
+// Otherwise it builds a fresh isolated home under in.BaseDir: copies auth.json + config.toml
+// verbatim from the real dir (so codex stays logged in and inherits the operator's
+// model_providers), appends a workspace trust entry + the vibecast MCP server (forwarding
+// VIBECAST_HOME, which codex's sanitized MCP subprocess env would otherwise drop — every tool
+// call fails with "control server unavailable" without it), then writes hooks.json. Real user
+// files are only read, never written.
+func (codexAdapter) Prepare(in PrepareInput) (map[string]string, error) {
+	realDir := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if realDir == "" {
+		realDir = filepath.Join(os.Getenv("HOME"), ".codex")
+	}
+	if codexHomeIsVibecastSeeded(realDir) {
+		return map[string]string{"CODEX_HOME": realDir}, nil
+	}
+
+	cfgDir := filepath.Join(in.BaseDir, "codex-home")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		return nil, err
+	}
+
+	// auth.json (0600) so `codex login status` stays green against the same account. Absence is
+	// tolerated — env-key / model-provider auth may cover it.
+	if auth, err := os.ReadFile(filepath.Join(realDir, "auth.json")); err == nil {
+		if err := os.WriteFile(filepath.Join(cfgDir, "auth.json"), auth, 0o600); err != nil {
+			return nil, err
+		}
+	}
+
+	// config.toml verbatim (inherits model_providers + onboarding), then a trust entry for the
+	// work dir and the vibecast MCP server. A distinct [projects."path"] sub-table is required —
+	// a bare dotted key at EOF would inherit the previous table's context (e.g. land under
+	// [model_providers.x]).
+	var toml strings.Builder
+	if base, err := os.ReadFile(filepath.Join(realDir, "config.toml")); err == nil {
+		toml.Write(base)
+		if !strings.HasSuffix(toml.String(), "\n") {
+			toml.WriteByte('\n')
+		}
+	}
+	if in.Workspace != "" {
+		trustPaths := map[string]bool{in.Workspace: true}
+		if rp, err := filepath.EvalSymlinks(in.Workspace); err == nil {
+			trustPaths[rp] = true
+		}
+		for p := range trustPaths {
+			esc := strings.ReplaceAll(p, `\`, `\\`)
+			esc = strings.ReplaceAll(esc, `"`, `\"`)
+			fmt.Fprintf(&toml, "\n[projects.\"%s\"]\ntrust_level = \"trusted\"\n", esc)
+		}
+	}
+	if in.VibecastBin != "" {
+		mcpEnv := map[string]string{}
+		if in.VibecastHome != "" {
+			mcpEnv["VIBECAST_HOME"] = in.VibecastHome
+		}
+		toml.WriteString(CodexMCPServersTOML(in.VibecastBin, mcpEnv))
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(toml.String()), 0o600); err != nil {
+		return nil, err
+	}
+
+	// hooks.json — codex loads it from the config layer regardless of workspace trust; the
+	// absolute vibecast path is baked in (CodexHooksJSON) so the hook subprocess resolves
+	// without PATH assumptions. --dangerously-bypass-hook-trust (codexHookTrustFlag) loads it
+	// without the interactive review gate.
+	if in.VibecastBin != "" {
+		if err := os.WriteFile(filepath.Join(cfgDir, "hooks.json"), CodexHooksJSON(in.VibecastBin), 0o600); err != nil {
+			return nil, err
+		}
+	}
+
+	return map[string]string{"CODEX_HOME": cfgDir}, nil
 }
 
 // codexModelFlag maps the per-station model config to `codex -m <model>`. Codex model names

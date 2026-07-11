@@ -42,12 +42,32 @@ type LaunchSpec struct {
 	JobMode            bool     // AGENTICS_JOB_MODE=1 — unattended job; the completion signal (stop_broadcast) is the contract
 }
 
+// PrepareInput carries the runtime paths a config-seed needs. stream.go builds it once
+// per stream (in StartStream, before the first SpawnPane) and passes it to the selected
+// adapter's Prepare.
+type PrepareInput struct {
+	BaseDir      string // parent dir under which to write an isolated agent config home
+	Workspace    string // the work dir to pre-trust (so no folder-trust dialog blocks)
+	VibecastBin  string // absolute vibecast binary path (baked into hooks + the MCP command)
+	VibecastHome string // VIBECAST_HOME — forwarded into codex's sanitized MCP subprocess env
+}
+
 // Adapter is the pluggable coding-agent seam.
 type Adapter interface {
 	// Kind returns the agent identity.
 	Kind() Kind
 	// BinaryName is the executable the caller resolves with exec.LookPath.
 	BinaryName() string
+	// Prepare seeds an isolated, pre-trusted config home for the agent — the production
+	// analog of the conformance harness's host-side config_seed. It writes whatever the
+	// agent needs to fire vibecast's lifecycle hooks + MCP tools (codex: a CODEX_HOME with
+	// hooks.json + config.toml MCP/trust) and returns the env vars the launch path must set
+	// on the pane's environment (e.g. {"CODEX_HOME": dir}). Claude needs none (its hooks/MCP
+	// ride in --plugin-dir and its config home comes from the runner env), so it returns
+	// (nil, nil). Called once per stream before SpawnPane; must be idempotent (a restart in
+	// the same process may call it again) and a no-op when the config home is already
+	// vibecast-seeded (so the conformance harness's host-side seed is never double-applied).
+	Prepare(in PrepareInput) (map[string]string, error)
 	// DiscoversOwnSessionID reports whether the agent generates its own session id at
 	// runtime (surfaced via the SessionStart hook) rather than accepting a pre-assigned
 	// one. When true, the launch path records an empty session-id placeholder and the

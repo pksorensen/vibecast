@@ -710,6 +710,35 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 			return streamError(span, fmt.Errorf("failed to create tmux session: %w", err))
 		}
 
+		// Seed the selected agent's isolated config home (codex: CODEX_HOME with hooks.json +
+		// config.toml MCP/trust) so it fires vibecast's lifecycle hooks and can call the MCP
+		// completion tools. Claude/pi are no-ops. The returned env is set on BOTH this process
+		// (the agent pane is spawned with os.Environ, so this is what actually reaches it) and
+		// the tmux session (belt-and-suspenders, matching the other propagated vars). A seed
+		// failure is logged, not fatal — the agent still launches (degraded) rather than
+		// aborting the stream; an already-vibecast-seeded home (conformance harness) no-ops.
+		if ad, err := agent.Selected(); err != nil {
+			logDebug("[stream] agent.Selected: %v\n", err)
+		} else {
+			seedBaseDir := os.Getenv("VIBECAST_HOME")
+			if seedBaseDir == "" {
+				seedBaseDir = sessionDir
+			}
+			seedEnv, perr := ad.Prepare(agent.PrepareInput{
+				BaseDir:      seedBaseDir,
+				Workspace:    resolveWorkDir(),
+				VibecastBin:  vibecastPath,
+				VibecastHome: os.Getenv("VIBECAST_HOME"),
+			})
+			if perr != nil {
+				logDebug("[stream] %s Prepare: %v\n", ad.Kind(), perr)
+			}
+			for k, v := range seedEnv {
+				os.Setenv(k, v)
+				exec.Command("tmux", "set-environment", "-t", sessionName, k, v).Run()
+			}
+		}
+
 		exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_SESSION_ID", sessionID).Run()
 		exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_BROADCAST_ID", broadcastID).Run()
 		// Propagate W3C traceparent for this stream so hook subprocesses create child spans.

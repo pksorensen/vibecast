@@ -17,6 +17,11 @@ func (claudeAdapter) Kind() Kind                  { return KindClaude }
 func (claudeAdapter) BinaryName() string          { return "claude" }
 func (claudeAdapter) DiscoversOwnSessionID() bool { return false }
 
+// Prepare is a no-op for claude: its lifecycle hooks + MCP ride in the --plugin-dir list
+// (spec.PluginDirs), and its config home (CLAUDE_CONFIG_DIR) + credentials are provided by
+// the runner's devcontainer environment — nothing for vibecast to seed.
+func (claudeAdapter) Prepare(PrepareInput) (map[string]string, error) { return nil, nil }
+
 func (claudeAdapter) BuildCommand(binPath string, spec LaunchSpec) (string, error) {
 	cmd := binPath + " --dangerously-skip-permissions"
 	cmd += claudePluginFlags(spec.PluginDirs)

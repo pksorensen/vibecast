@@ -40,6 +40,14 @@ func (piAdapter) Kind() Kind                  { return KindPi }
 func (piAdapter) BinaryName() string          { return "pi" }
 func (piAdapter) DiscoversOwnSessionID() bool { return true }
 
+// Prepare is a no-op in production for now: pi's hook bridge (the vibecast.ts extension) and
+// its Foundry model-provider wiring are seeded only in the conformance harness
+// (preparePiConfig). Production pi enablement is deferred — the www agent picker offers only
+// claude + codex — so vibecast does not yet self-seed PI_CODING_AGENT_DIR. Returning
+// (nil, nil) keeps VIBECAST_AGENT=pi from erroring; it would launch pi without vibecast's
+// extension until this seam is filled in.
+func (piAdapter) Prepare(PrepareInput) (map[string]string, error) { return nil, nil }
+
 func (piAdapter) BuildCommand(binPath string, spec LaunchSpec) (string, error) {
 	cmd := binPath
 	cmd += piModelFlag(spec.Model, spec.ModelTier)
