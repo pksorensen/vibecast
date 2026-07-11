@@ -273,6 +273,20 @@ func mcpToolsList() []interface{} {
 			},
 		},
 		map[string]interface{}{
+			"name":        "chat_reply",
+			"description": "Send one assistant turn back over the Chat Channel for a chat-session:v1 Job (ALP spec 13-chat.md). Sibling of stop_broadcast (the complete_station equivalent) — call this once per reply while a live chat session is open; still call stop_broadcast (or let the stop-hook fallback fire) when the chat itself ends.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"text": map[string]interface{}{
+						"type":        "string",
+						"description": "The assistant's reply text for this turn.",
+					},
+				},
+				"required": []string{"text"},
+			},
+		},
+		map[string]interface{}{
 			"name":        "share_image",
 			"description": "Share an image with the live broadcast audience. The image will be queued for the stream owner's approval before being shown to viewers. Alias for share_media.",
 			"inputSchema": map[string]interface{}{
@@ -483,31 +497,28 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 		if os.Getenv("AGENTICS_AUTO_GIT") == "1" {
 			cwd, _ := os.Getwd()
 
-			// Update origin to the current server URL before pushing.
-			// Workspaces are reused across retries; the origin URL may have a stale
-			// port from the first clone (e.g. localhost:36709) while the live server
-			// is now on a different port. AGENTICS_BASE_URL always holds the current
-			// server base URL set by the runner at startup.
-			if baseURL := os.Getenv("AGENTICS_BASE_URL"); baseURL != "" {
+			// Refresh the credentials embedded in origin before pushing -- the token
+			// baked in at clone time can expire/rotate over a long-running session.
+			// This must NOT touch origin's host/scheme/path: origin is authored via
+			// cloneUrlFor() at job-build time from this deployment's own AGENT_GIT_URL,
+			// so it already points at the current pks-agent-git instance (see
+			// agent-definition.ts's "no stale-port reconstruction needed" comment).
+			// A prior version of this block rewrote host+scheme to AGENTICS_BASE_URL --
+			// the *website's* base URL, a completely different service from the git
+			// server -- which broke every push with "repository not found" once
+			// pks-agent-git became a separate deployment from the website.
+			token := os.Getenv("AGENTICS_REPO_TOKEN")
+			if token == "" {
+				token = os.Getenv("AGENTICS_TOKEN")
+			}
+			if token != "" {
 				if rawOrigin, err := execCommand("git", "-C", cwd, "remote", "get-url", "origin"); err == nil {
 					rawOrigin = strings.TrimSpace(rawOrigin)
 					if parsedOrigin, err := url.Parse(rawOrigin); err == nil {
-						if parsedBase, err := url.Parse(baseURL); err == nil {
-							parsedOrigin.Host = parsedBase.Host
-							parsedOrigin.Scheme = parsedBase.Scheme
-							// Prefer AGENTICS_REPO_TOKEN (project repo.git token) over AGENTICS_TOKEN
-							// (runner API token) — the git server validates against the repo token, not the runner token.
-							token := os.Getenv("AGENTICS_REPO_TOKEN")
-							if token == "" {
-								token = os.Getenv("AGENTICS_TOKEN")
-							}
-							if token != "" {
-								parsedOrigin.User = url.UserPassword("x-access-token", token)
-							}
-							newOrigin := parsedOrigin.String()
-							exec.Command("git", "-C", cwd, "remote", "set-url", "origin", newOrigin).Run()
-							fmt.Fprintf(os.Stderr, "auto-git: updated origin host to %s\n", parsedBase.Host)
-						}
+						parsedOrigin.User = url.UserPassword("x-access-token", token)
+						newOrigin := parsedOrigin.String()
+						exec.Command("git", "-C", cwd, "remote", "set-url", "origin", newOrigin).Run()
+						fmt.Fprintf(os.Stderr, "auto-git: refreshed origin credentials\n")
 					}
 				}
 			}
@@ -593,6 +604,27 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 		body, err := control.ControlHTTPRequestWithBody(sockPath, "POST", "/stop-broadcast", stopPayload)
 		if err != nil {
 			resultText = fmt.Sprintf("Failed to stop broadcast: %v", err)
+			isError = true
+		} else {
+			resultText = body
+		}
+
+	case "chat_reply":
+		var args struct {
+			Text string `json:"text"`
+		}
+		if params.Arguments != nil {
+			json.Unmarshal(params.Arguments, &args)
+		}
+		if strings.TrimSpace(args.Text) == "" {
+			resultText = "text is required"
+			isError = true
+			break
+		}
+		payload, _ := json.Marshal(map[string]string{"text": args.Text})
+		body, err := control.ControlHTTPRequestWithBody(sockPath, "POST", "/chat-reply", payload)
+		if err != nil {
+			resultText = fmt.Sprintf("Failed to send chat reply: %v", err)
 			isError = true
 		} else {
 			resultText = body

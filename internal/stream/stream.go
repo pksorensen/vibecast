@@ -38,6 +38,32 @@ func logDebug(format string, args ...interface{}) {
 	}
 }
 
+// maybeStartChatChannel opens the Operator's Chat Channel (chat-session:v1, ALP spec
+// external/alp-spec/2026-03-30-draft/spec/13-chat.md) for the job's designated "main" pane,
+// gated by AGENTICS_CHAT_SESSION=1 — set by the Runner alongside the existing
+// AGENTICS_JOB_ID/AGENTICS_JOB_MODE env vars when it spawns vibecast to service a chat-kind
+// Station Task. vibecast otherwise never distinguishes Station "kinds" (see stream.go's
+// generic per-station config env vars); this is the one deliberate exception, and it is
+// scoped to a single connection per process via status.ChatChannelStarted so repeat
+// SpawnPane calls (extra sub-agent panes, resume-after-restart) don't open duplicates.
+func maybeStartChatChannel(sessionID, paneId string, status *types.SharedStatus) {
+	if paneId != "main" || os.Getenv("AGENTICS_CHAT_SESSION") != "1" {
+		return
+	}
+	jobID := os.Getenv("AGENTICS_JOB_ID")
+	if jobID == "" || status == nil {
+		return
+	}
+	status.Mu.Lock()
+	if status.ChatChannelStarted {
+		status.Mu.Unlock()
+		return
+	}
+	status.ChatChannelStarted = true
+	status.Mu.Unlock()
+	go broadcast.ConnectChatChannel(jobID, sessionID, paneId, status)
+}
+
 func buildPluginFlags() string {
 	flags := ""
 	if dir := telemetry.PluginDir(); dir != "" {
@@ -199,6 +225,19 @@ func buildEffortFlag() string {
 	return " --effort " + effort
 }
 
+// buildDevAgentChannelFlag maps VIBECAST_CLAUDE_CHANNEL to `claude --dangerously-load-development-channels
+// <value>`. Set by the Runner's launch script when this session is a devcontainer-hosted devagent
+// session with a `.mcp.json` agent-share entry already written (plan `snappy-wandering-mochi` Phase 3) —
+// empty → no flag.
+func buildDevAgentChannelFlag() string {
+	channel := strings.TrimSpace(os.Getenv("VIBECAST_CLAUDE_CHANNEL"))
+	if channel == "" {
+		return ""
+	}
+	escaped := strings.ReplaceAll(channel, "'", "'\"'\"'")
+	return " --dangerously-load-development-channels '" + escaped + "'"
+}
+
 // claudeUpdateOnce guarantees the update/pin runs at most once per vibecast
 // process. A vibecast process serves a single broadcast session (one assembly
 // line), so this freezes the Claude version for the whole line — every station
@@ -283,6 +322,7 @@ func buildClaudeCommand(claudePath string, sessionID string) string {
 	cmd += buildPluginFlags()
 	cmd += buildModelFlag()
 	cmd += buildEffortFlag()
+	cmd += buildDevAgentChannelFlag()
 	cmd += buildAppendSystemPromptFlag()
 	cmd += buildInitialPromptArg()
 	cmd += claudeSessionIDFlag(sessionID)
@@ -293,15 +333,16 @@ func buildClaudeResumeCommand(claudePath string, sessionID string) string {
 	pluginFlags := buildPluginFlags()
 	modelFlag := buildModelFlag()
 	effortFlag := buildEffortFlag()
+	channelFlag := buildDevAgentChannelFlag()
 	promptFlag := buildAppendSystemPromptFlag()
 	initialPrompt := buildInitialPromptArg()
 	if sessionID != "" && util.IsUUIDv4(sessionID) {
-		return claudePath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + promptFlag + " --resume " + sessionID + initialPrompt
+		return claudePath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + channelFlag + promptFlag + " --resume " + sessionID + initialPrompt
 	}
 	if sessionID != "" {
 		logDebug("[claude-cmd] dropping --resume %q: not a UUIDv4, falling back to --continue\n", sessionID)
 	}
-	return claudePath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + promptFlag + " --continue" + initialPrompt
+	return claudePath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + channelFlag + promptFlag + " --continue" + initialPrompt
 }
 
 // DoRestartClaude performs the actual restart logic.
@@ -656,6 +697,7 @@ func SpawnPane(sessionName, sessionID, paneId, name string, status *types.Shared
 	metaCh := make(chan []byte, 16)
 
 	go broadcast.ConnectBroadcast(sessionID, status, metaCh, ttydPort, paneId)
+	maybeStartChatChannel(sessionID, paneId, status)
 
 	// Update pane tracking in SharedStatus
 	if status != nil {
@@ -1221,6 +1263,7 @@ func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 
 				metaCh := make(chan []byte, 16)
 				go broadcast.ConnectBroadcast(sessionID, status, metaCh, ttydPort, pe.PaneID)
+				maybeStartChatChannel(sessionID, pe.PaneID, status)
 
 				pane := &types.PaneInfo{
 					PaneId:          pe.PaneID,

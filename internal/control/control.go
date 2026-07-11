@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,6 +19,7 @@ import (
 	"github.com/pksorensen/vibecast/internal/telemetry"
 	"github.com/pksorensen/vibecast/internal/types"
 	"github.com/pksorensen/vibecast/internal/util"
+	ws "github.com/pksorensen/vibecast/internal/websocket"
 )
 
 var debugLog = os.Getenv("VIBECAST_DEBUG") != ""
@@ -120,6 +122,53 @@ func StartControlServer(status *types.SharedStatus, program *tea.Program, restar
 		go program.Send(msg)
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"ok":true,"message":"Session will end in 10 seconds. Final metadata and transcript will be flushed before disconnecting."}`)
+	})
+
+	// /chat-reply is the control-socket bridge for the chat_reply MCP tool (chat-session:v1,
+	// ALP spec external/alp-spec/2026-03-30-draft/spec/13-chat.md). The MCP server runs as a
+	// separate stdio process, so it cannot hold the Chat Channel connection itself — it POSTs
+	// here instead, and this handler writes the chat.reply frame directly to
+	// status.ChatChannelConn (the outbound WS opened by broadcast.ConnectChatChannel).
+	mux.HandleFunc("/chat-reply", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Text) == "" {
+			http.Error(w, `{"error":"text is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		status.Mu.Lock()
+		conn := status.ChatChannelConn
+		jobID := status.ChatJobID
+		status.Mu.Unlock()
+
+		if conn == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintf(w, `{"ok":false,"error":"chat channel not connected"}`)
+			return
+		}
+
+		reply, _ := json.Marshal(map[string]string{
+			"type":  "chat.reply",
+			"jobId": jobID,
+			"text":  body.Text,
+		})
+		if err := ws.SendText(conn, reply); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			data, _ := json.Marshal(map[string]interface{}{"ok": false, "error": err.Error()})
+			w.Write(data)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"ok":true}`)
 	})
 
 	mux.HandleFunc("/change-server", func(w http.ResponseWriter, r *http.Request) {
