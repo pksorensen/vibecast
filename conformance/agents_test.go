@@ -41,7 +41,25 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	vibecastBin = bin
+
+	// pi's real-mode model comes from Azure Foundry gpt-5.5 via `pks foundry proxy` (Poul's
+	// choice). Start one shared token-swapping proxy for the whole run when pi is selected;
+	// preparePiConfig reads its URL/token to write pi's pks-foundry provider. Absent pks it's a
+	// no-op (keyless pi — C01/C02 still register).
+	var foundryProxy *harness.FoundryProxy
+	for _, a := range selectedAgents() {
+		if a == "pi" {
+			fp, ferr := harness.StartFoundryProxy()
+			if ferr != nil {
+				fmt.Fprintln(os.Stderr, "conformance: foundry proxy unavailable:", ferr)
+			}
+			foundryProxy = fp
+			break
+		}
+	}
+
 	code := m.Run()
+	foundryProxy.Stop()
 	_ = os.RemoveAll(tmp)
 	os.Exit(code)
 }
@@ -358,8 +376,13 @@ func scenarioC05(t *testing.T, agent string) {
 func scenarioC06(t *testing.T, agent string) {
 	nonce := newNonce(t)
 	promptFile := filepath.Join(t.TempDir(), "initial-prompt.txt")
-	body := "Reply with exactly this token on a line by itself: " + nonce +
-		". Do not use any tools and do not say anything else."
+	// Phrased as a benign integration check rather than "echo this exact token, say nothing
+	// else" — the latter reads as a canary/prompt-injection probe to a content-filtered provider
+	// (Azure Foundry's prompt shield refuses it 0/4; this phrasing passes 4/4) while still eliciting
+	// the nonce in the reply for every agent. No tools requested keeps it a single clean turn.
+	body := "This is an automated integration check. Please reply with one short sentence that " +
+		"includes the build tag " + nonce + " so the harness can confirm your reply was received. " +
+		"You do not need to run any tools."
 	if err := os.WriteFile(promptFile, []byte(body), 0o644); err != nil {
 		t.Fatalf("write prompt file: %v", err)
 	}
@@ -536,8 +559,13 @@ func scenarioC09(t *testing.T, agent string) {
 	// live model output — out of scope here).
 	nonce := newNonce(t)
 	promptFile := filepath.Join(t.TempDir(), "initial-prompt.txt")
-	body := "Reply with exactly this token on a line by itself: " + nonce +
-		". Do not use any tools and do not say anything else."
+	// Phrased as a benign integration check rather than "echo this exact token, say nothing
+	// else" — the latter reads as a canary/prompt-injection probe to a content-filtered provider
+	// (Azure Foundry's prompt shield refuses it 0/4; this phrasing passes 4/4) while still eliciting
+	// the nonce in the reply for every agent. No tools requested keeps it a single clean turn.
+	body := "This is an automated integration check. Please reply with one short sentence that " +
+		"includes the build tag " + nonce + " so the harness can confirm your reply was received. " +
+		"You do not need to run any tools."
 	if err := os.WriteFile(promptFile, []byte(body), 0o644); err != nil {
 		t.Fatalf("write prompt file: %v", err)
 	}

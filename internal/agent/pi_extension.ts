@@ -128,19 +128,42 @@ export default function (pi: any) {
 		});
 	});
 
+	// Concatenate the text of a pi message's content blocks. pi messages carry
+	// content: [{type:"thinking",…}, {type:"text", text:"…"}] (verified via --mode json), so the
+	// assistant reply is the joined text of the "text" blocks; a plain-string content is tolerated.
+	function messageText(m: any): string {
+		const c = m?.content;
+		if (typeof c === "string") return c;
+		if (Array.isArray(c)) {
+			return c
+				.filter((b: any) => b && b.type === "text" && typeof b.text === "string")
+				.map((b: any) => b.text)
+				.join("");
+		}
+		return typeof m?.text === "string" ? m.text : "";
+	}
+
 	// agent_end fires once per completed user prompt (a turn boundary / completion signal) →
-	// `hook stop` (Stop, carries the last assistant message). The C06 turn-complete signal.
+	// `hook stop` (Stop, carries the last assistant message). pi has no Claude-format transcript, so
+	// this last_assistant_message is how the reply text reaches vibecast (handleHookStop's payload
+	// fallback → assistant_response). The C06 turn-complete + C04 system-prompt-honored signal.
 	pi.on("agent_end", (event: any, ctx: any) => {
 		let last = "";
+		// Claude-shape transcript lines for the turn, so the Stop-derived assistant_response carries
+		// transcriptLines (pi has no Claude-format transcript file for vibecast to read). This both
+		// marks the event as Stop-derived (conformance C06) and seeds pi's conversation feed.
+		const transcript_lines: any[] = [];
 		try {
 			const msgs = event?.messages;
 			if (Array.isArray(msgs)) {
-				for (let i = msgs.length - 1; i >= 0; i--) {
-					const m = msgs[i];
-					if (m?.role === "assistant") {
-						last = typeof m?.content === "string" ? m.content : (m?.text || "");
-						break;
-					}
+				for (const m of msgs) {
+					const text = messageText(m);
+					if (!text) continue;
+					if (m.role === "assistant") last = text;
+					transcript_lines.push({
+						type: m.role,
+						message: { role: m.role, content: [{ type: "text", text }] },
+					});
 				}
 			}
 		} catch {
@@ -150,6 +173,7 @@ export default function (pi: any) {
 			hook_event_name: "Stop",
 			session_id: sessionId(ctx),
 			last_assistant_message: last,
+			transcript_lines,
 			stop_hook_active: false,
 		});
 	});

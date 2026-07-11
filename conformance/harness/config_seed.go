@@ -170,6 +170,40 @@ func preparePiConfig(baseDir, workspace, vibecastBin string) (map[string]string,
 	if vibecastBin != "" {
 		env["VIBECAST_BIN"] = vibecastBin
 	}
+
+	// Real-mode model: when a Foundry proxy is running (StartFoundryProxy), wire pi's pks-foundry
+	// provider at its endpoint and make it the default so pi uses Foundry gpt-5.5 with no --model
+	// flag. models.json declares the provider (OpenAI Responses API + Bearer proxy-token via
+	// authHeader); settings.json defaults to it. FOUNDRY_PROXY_TOKEN is resolved by pi from the
+	// env (apiKey field names the var). Proven standalone: `pi --model pks-foundry/gpt-5.5` returns
+	// a Foundry response through this proxy. With no proxy, pi launches keyless (C01/C02 only).
+	if piFoundryURL != "" {
+		modelsJSON := fmt.Sprintf(`{
+  "providers": {
+    "pks-foundry": {
+      "baseUrl": %q,
+      "api": "openai-responses",
+      "apiKey": "FOUNDRY_PROXY_TOKEN",
+      "authHeader": true,
+      "models": [ { "id": "gpt-5.5" } ]
+    }
+  }
+}
+`, piFoundryURL+"/openai/v1")
+		if err := os.WriteFile(filepath.Join(cfgDir, "models.json"), []byte(modelsJSON), 0o600); err != nil {
+			return nil, err
+		}
+		settingsJSON := `{
+  "defaultProvider": "pks-foundry",
+  "defaultModel": "gpt-5.5"
+}
+`
+		if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(settingsJSON), 0o600); err != nil {
+			return nil, err
+		}
+		env["FOUNDRY_PROXY_TOKEN"] = piFoundryToken
+	}
+
 	return env, nil
 }
 

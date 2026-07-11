@@ -1046,9 +1046,28 @@ func waitForFinalAssistant(streamID, transcriptPath string, timeout time.Duratio
 }
 
 func handleHookStop() {
-	_, sf, cwd, transcriptPath, _ := hookReadStdinAndFindSession()
+	stdinData, sf, cwd, transcriptPath, _ := hookReadStdinAndFindSession()
 
 	transcriptLines, text, usage := waitForFinalAssistant(sf.SessionID, transcriptPath, 2*time.Second)
+
+	// Fallback for agents without a Claude-format transcript to parse (pi, whose session JSONL is
+	// its own format): the Stop hook payload carries last_assistant_message + transcript_lines
+	// directly. Claude/codex still prefer the transcript-derived values above; these only fill in
+	// when the transcript yielded nothing.
+	if text == "" || len(transcriptLines) == 0 {
+		var in struct {
+			LastAssistantMessage string                   `json:"last_assistant_message"`
+			TranscriptLines      []map[string]interface{} `json:"transcript_lines"`
+		}
+		if json.Unmarshal(stdinData, &in) == nil {
+			if text == "" && in.LastAssistantMessage != "" {
+				text = in.LastAssistantMessage
+			}
+			if len(transcriptLines) == 0 && len(in.TranscriptLines) > 0 {
+				transcriptLines = in.TranscriptLines
+			}
+		}
+	}
 
 	if text != "" || usage != nil {
 		p := map[string]interface{}{
