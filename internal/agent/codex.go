@@ -17,10 +17,12 @@ import (
 //
 // Three deliberate differences from the Claude adapter, all grounded in
 // docs/agents/research/codex.md:
-//   - No `--dangerously-skip-permissions`. Codex's guard backstop is
-//     sandbox_mode=workspace-write + approval_policy=on-request (seeded in config.toml),
-//     with the PreToolUse guard hook on top. vibecast must NEVER launch codex with
-//     `--dangerously-bypass-approvals-and-sandbox` — that removes the sandbox backstop.
+//   - No `--dangerously-skip-permissions`. The enforcement floor is approval_policy=on-request
+//     + the PreToolUse guard hook. Codex additionally runs with -s danger-full-access
+//     (sandbox_mode ONLY — see codexSandboxFlag), because its default workspace-write OS
+//     sandbox cannot initialize in the ALP Runner container. vibecast must STILL never pass
+//     `--dangerously-bypass-approvals-and-sandbox` — that flag ALSO kills approvals, and a
+//     golden-test invariant forbids it.
 //   - No session-id pre-assignment. Codex generates its own UUIDv7 and surfaces it via the
 //     SessionStart hook (discover-identity), so a fresh launch carries no session-id flag
 //     even when spec.AgentSessionID is set.
@@ -30,10 +32,12 @@ import (
 // Every launch carries --dangerously-bypass-hook-trust: vibecast writes a hooks.json into
 // the codex config layer (see CodexHooksJSON) to wire the SessionStart discover-identity
 // hook + PreToolUse guard, and codex would otherwise block on an interactive "hooks need
-// review" gate. This is hook-trust ONLY — it never touches the sandbox/approval backstop
-// (that would require --dangerously-bypass-approvals-and-sandbox, which vibecast must never
-// pass). The flag is both a global option and a `resume` subcommand option, and hooks.json
-// persists in CODEX_HOME across a resume, so both launch paths carry it.
+// review" gate. This flag is hook-trust ONLY — a separate axis from the sandbox posture
+// (which -s danger-full-access sets) and from approvals (which stay on-request). The
+// forbidden --dangerously-bypass-approvals-and-sandbox collapses all three at once; vibecast
+// never passes it. --dangerously-bypass-hook-trust is both a global option and a `resume`
+// subcommand option, and hooks.json persists in CODEX_HOME across a resume, so both launch
+// paths carry it.
 //
 // v1 covers the launch surface: model + station system-prompt append
 // (developer_instructions) + initial prompt + resume + hook wiring. Effort and guard-tuning
@@ -43,6 +47,28 @@ type codexAdapter struct{}
 // codexHookTrustFlag skips codex's interactive hooks-review gate so vibecast's generated
 // hooks.json loads non-interactively. Hook-trust only — NOT the sandbox/approval bypass.
 const codexHookTrustFlag = " --dangerously-bypass-hook-trust"
+
+// codexSandboxFlag runs codex with sandbox_mode=danger-full-access (the `-s`/`--sandbox`
+// flag ONLY — never --dangerously-bypass-approvals-and-sandbox, which additionally sets
+// approval=never and is forbidden by a golden-test invariant).
+//
+// Why this is deliberate, not a weakening: codex enforces its default workspace-write sandbox
+// by wrapping every model-generated write/shell command in its bundled codex-linux-sandbox,
+// which requires an unprivileged user namespace + a uid_map write. The ALP Runner container
+// (and this devcontainer) denies that write — `unshare -Ur true` fails with
+// `write failed /proc/self/uid_map: Operation not permitted`. Under workspace-write that makes
+// EVERY apply_patch/write fail inside the sandbox; codex then stalls on an unanswerable
+// "retry without sandbox?" prompt (conformance C05 timed out this way). No codex config fixes
+// it (network_access=true doesn't help — the block is the userns, not the netns).
+//
+// danger-full-access removes only that OS backstop. It is NOT the approval bypass:
+// approval_policy stays on-request, and — verified empirically — vibecast's PreToolUse guard
+// hook STILL FIRES under danger-full-access, so the semantic dangerous-command block (C08)
+// remains the enforcement floor. The container itself is the isolation boundary; the OS
+// sandbox beneath the guard hook was redundant here and could not initialize regardless.
+// Operator-signed-off: "we trust LLMs to run in this environment." Set on both launch and
+// resume (-s is valid on the resume subcommand too). See docs/agents/research/codex.md.
+const codexSandboxFlag = " -s danger-full-access"
 
 // codexMCPToolExposureFlags forces vibecast's MCP tools to be exposed directly in the model's
 // toolset instead of being hidden behind codex's tool_search meta-tool.
@@ -85,7 +111,7 @@ func (codexAdapter) BinaryName() string          { return "codex" }
 func (codexAdapter) DiscoversOwnSessionID() bool { return true }
 
 func (codexAdapter) BuildCommand(binPath string, spec LaunchSpec) (string, error) {
-	cmd := binPath + codexHookTrustFlag + codexMCPToolExposureFlags
+	cmd := binPath + codexHookTrustFlag + codexMCPToolExposureFlags + codexSandboxFlag
 	cmd += codexModelFlag(spec.Model, spec.ModelTier)
 	cmd += codexDeveloperInstructionsFlag(spec.SystemPromptFile, spec.SystemPromptInline, spec.JobMode)
 	cmd += codexInitialPromptArg(spec.InitialPromptFile)
@@ -96,12 +122,12 @@ func (codexAdapter) BuildResumeCommand(binPath string, spec LaunchSpec, agentSes
 	devInstr := codexDeveloperInstructionsFlag(spec.SystemPromptFile, spec.SystemPromptInline, spec.JobMode)
 	initialPrompt := codexInitialPromptArg(spec.InitialPromptFile)
 	if agentSessionID != "" && util.IsUUID(agentSessionID) {
-		return binPath + " resume" + codexHookTrustFlag + codexMCPToolExposureFlags + devInstr + " " + agentSessionID + initialPrompt, nil
+		return binPath + " resume" + codexHookTrustFlag + codexMCPToolExposureFlags + codexSandboxFlag + devInstr + " " + agentSessionID + initialPrompt, nil
 	}
 	if agentSessionID != "" {
 		logDebug("[codex-cmd] dropping resume %q: not a UUID, falling back to --last\n", agentSessionID)
 	}
-	return binPath + " resume" + codexHookTrustFlag + codexMCPToolExposureFlags + devInstr + " --last" + initialPrompt, nil
+	return binPath + " resume" + codexHookTrustFlag + codexMCPToolExposureFlags + codexSandboxFlag + devInstr + " --last" + initialPrompt, nil
 }
 
 // codexModelFlag maps the per-station model config to `codex -m <model>`. Codex model names
@@ -238,10 +264,12 @@ func CodexHooksJSON(vibecastBin string) []byte {
 //     --dangerously-skip-permissions auto-approves all its tools; this is the codex analog,
 //     scoped to vibecast's OWN control-plane MCP tools (stop_broadcast, restart_claude, …) —
 //     the agent signalling lifecycle back to vibecast, not doing work in the workspace. It is
-//     NOT the sandbox/approval bypass: the agent's shell + apply_patch calls stay gated by
-//     sandbox=workspace-write + approval=on-request + the PreToolUse guard hook. That guard
-//     floor is exactly what --dangerously-bypass-approvals-and-sandbox would remove, and this
-//     never touches it.
+//     NOT the approval bypass: the agent's shell + apply_patch calls stay gated by
+//     approval=on-request + the PreToolUse guard hook. (The OS sandbox is disabled via
+//     -s danger-full-access because it can't initialize in the runner container — see
+//     codexSandboxFlag — so the guard hook, not the OS sandbox, is the enforcement floor.)
+//     --dangerously-bypass-approvals-and-sandbox would remove approvals AND the guard-gated
+//     approval path too; this never touches either.
 //
 // env keys are emitted sorted for deterministic output (golden-test stable). An empty env
 // map omits the `env` line entirely.

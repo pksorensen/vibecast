@@ -170,9 +170,13 @@ type LaunchSpec struct {
 // BypassAll UNCONDITIONALLY — `--dangerously-skip-permissions` is hardcoded into every
 // launch and resume command, interactive AND job mode. The v1 claude adapter keeps
 // that (byte-identical); do NOT derive it from AGENTICS_JOB_MODE.
-// codex BypassAll = `approval_policy=never` + `sandbox_mode=workspace-write` (+ writable
-// roots). `--dangerously-bypass-approvals-and-sandbox` is FORBIDDEN — §4's guard design
-// relies on the sandbox as the apply_patch backstop.
+// codex BypassAll = approval_policy=on-request + PreToolUse guard hook (the enforcement
+// floor) + `-s danger-full-access`. The OS sandbox is deliberately OFF: codex's default
+// workspace-write sandbox needs an unprivileged userns + uid_map write, which the ALP Runner
+// container denies, so under workspace-write every apply_patch fails (conformance C05). The
+// guard hook still fires under danger-full-access, so §4's guard design holds without the OS
+// sandbox. `--dangerously-bypass-approvals-and-sandbox` remains FORBIDDEN — it ALSO kills
+// approvals (a golden-test invariant blocks it). See internal/agent/codex.go codexSandboxFlag.
 // pi = no permission system; BypassAll is a no-op.
 type PermissionMode int
 const (
@@ -345,7 +349,10 @@ Rules stay **semantic**: the codex probe showed a denied `rm` being replayed as
 `find -delete`. Deny reasons must state the *intent* blocked ("process-kill of the
 operator", "write outside job worktree") so models don't treat it as a syntax puzzle.
 Sandbox/approval configs remain enabled as defense in depth wherever the agent has them
-(codex: `sandbox_mode=workspace-write` is mandatory, see PermissionMode note).
+AND can initialize. For codex the OS sandbox is the exception: `sandbox_mode=workspace-write`
+cannot start in the ALP Runner container (userns/uid_map denied), so vibecast runs codex with
+`-s danger-full-access` and the PreToolUse guard hook + `approval_policy=on-request` carry the
+floor alone (see PermissionMode note and codex.go codexSandboxFlag).
 
 ## 5. Env contract (Runner ⇄ vibecast)
 
@@ -409,7 +416,8 @@ Unchanged and already neutral: `SESSION_ID`, `BROADCAST_ID`, `VIBECAST_INITIAL_P
    sequences.
 3. Conformance harness + Claude green (baseline).
 4. Codex adapter on `feat/multi-agent-codex` (managed CODEX_HOME wiring + auth
-   copy, discover-identity, resume, hooks-review gate, guard deny + sandbox backstop).
+   copy, discover-identity, resume, hooks-review gate, guard deny; `-s danger-full-access`
+   because the OS sandbox can't init in the runner container — guard hook is the floor).
 5. pi adapter on `feat/multi-agent-pi` (vibecast.ts extension, tools registration,
    preassign/discover by version; mock-provider conformance mode).
 6. Renames + platform plumbing (www-site, pks-cli) as a coordinated change (§6).

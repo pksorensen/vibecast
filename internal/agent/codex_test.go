@@ -15,20 +15,23 @@ const codexUUIDv7 = "019f4cf6-5e8d-7abc-8def-0123456789ab"
 
 // cxLaunch / cxResume are the invariant command prefixes every codex launch/resume carries:
 // hook-trust bypass + the two feature-disable overrides that keep vibecast's MCP tools in the
-// model's direct toolset (see codexMCPToolExposureFlags). These are spelled out as literals
-// here — NOT imported from the production const — so a regression in the production flag value
-// (a typo, a dropped flag, a re-enabled feature) breaks these golden assertions.
+// model's direct toolset (see codexMCPToolExposureFlags) + the -s danger-full-access sandbox
+// posture (see codexSandboxFlag — the OS sandbox can't init in the runner container, so the
+// PreToolUse guard hook is the floor). These are spelled out as literals here — NOT imported
+// from the production const — so a regression in the production flag value (a typo, a dropped
+// flag, a re-enabled feature, a silently changed sandbox mode) breaks these golden assertions.
 const (
-	cxLaunch = "codex --dangerously-bypass-hook-trust -c features.tool_suggest=false -c features.tool_search_always_defer_mcp_tools=false"
-	cxResume = "codex resume --dangerously-bypass-hook-trust -c features.tool_suggest=false -c features.tool_search_always_defer_mcp_tools=false"
+	cxLaunch = "codex --dangerously-bypass-hook-trust -c features.tool_suggest=false -c features.tool_search_always_defer_mcp_tools=false -s danger-full-access"
+	cxResume = "codex resume --dangerously-bypass-hook-trust -c features.tool_suggest=false -c features.tool_search_always_defer_mcp_tools=false -s danger-full-access"
 )
 
 // TestCodexBuildCommandGolden pins the fresh-launch command strings. Codex launches with no
-// permission-skip flag (sandbox is the backstop) but always carries
-// --dangerously-bypass-hook-trust (vibecast ships a hooks.json; this skips the interactive
-// hooks-review gate — hook-trust only, never the sandbox bypass). It never pre-assigns a
-// session id (discover-identity via the SessionStart hook), so AgentSessionID is ignored on
-// a fresh launch even when set.
+// permission-skip flag but always carries --dangerously-bypass-hook-trust (vibecast ships a
+// hooks.json; this skips the interactive hooks-review gate — hook-trust only) and
+// -s danger-full-access (the OS sandbox can't init in the runner container, so the PreToolUse
+// guard hook is the floor — never the --dangerously-bypass-approvals-and-sandbox bypass). It
+// never pre-assigns a session id (discover-identity via the SessionStart hook), so
+// AgentSessionID is ignored on a fresh launch even when set.
 func TestCodexBuildCommandGolden(t *testing.T) {
 	ad := codexAdapter{}
 	tests := []struct {
@@ -125,10 +128,18 @@ func TestCodexBuildCommandGolden(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("BuildCommand mismatch\n got: %q\nwant: %q", got, tt.want)
 			}
-			// Safety invariant: hook-trust is bypassed, but the sandbox/approval backstop
-			// must NEVER be. A regression here removes codex's guard floor.
+			// Safety invariant: hook-trust and the OS sandbox may be relaxed, but the APPROVAL
+			// backstop must NEVER be — --dangerously-bypass-approvals-and-sandbox collapses
+			// approvals + the guard-gated path and is forbidden. -s danger-full-access (below)
+			// relaxes only the OS sandbox; approval=on-request + the PreToolUse guard hook stay.
 			if strings.Contains(got, "--dangerously-bypass-approvals-and-sandbox") {
-				t.Errorf("command must never bypass sandbox/approvals: %q", got)
+				t.Errorf("command must never bypass approvals: %q", got)
+			}
+			// The deliberate sandbox posture (see codexSandboxFlag): danger-full-access ONLY,
+			// because codex's workspace-write OS sandbox can't initialize in the runner container.
+			// This must be the -s flag form, never smuggled in via the approval-bypass flag.
+			if !strings.Contains(got, "-s danger-full-access") {
+				t.Errorf("command must set -s danger-full-access (OS sandbox can't init in the runner container): %q", got)
 			}
 			// C07 invariant: codex 0.142.x hides MCP tools behind a tool_search meta-tool
 			// unless BOTH of these features are disabled. Dropping either one regresses

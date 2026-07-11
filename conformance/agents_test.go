@@ -620,9 +620,15 @@ func scenarioC09(t *testing.T, agent string) {
 	}
 
 	// The agent must be relaunched against the harvested id — the launch command names it.
-	frag := resumeCommandFragment(agent, priorID)
-	waitFor(t, 20*time.Second, "agent pane relaunched with resume command containing "+frag, func() bool {
-		return strings.Contains(rs.AgentPaneStartCommand(), frag)
+	frags := resumeCommandFragments(agent, priorID)
+	waitFor(t, 20*time.Second, "agent pane relaunched with resume command naming "+priorID, func() bool {
+		cmd := rs.AgentPaneStartCommand()
+		for _, f := range frags {
+			if !strings.Contains(cmd, f) {
+				return false
+			}
+		}
+		return true
 	})
 
 	// And the agent process must actually have come back up under resume: a fresh session_start
@@ -636,7 +642,7 @@ func scenarioC09(t *testing.T, agent string) {
 		}
 		return n > phase1Starts
 	})
-	t.Logf("resume relaunched the agent with %q and it re-registered (stream %s)", frag, sess.SessionID)
+	t.Logf("resume relaunched the agent naming %q and it re-registered (stream %s)", priorID, sess.SessionID)
 }
 
 // scenarioC10 (session-end-reported): the operator's clean stop must be reported to the
@@ -799,23 +805,27 @@ func firesSessionStartAtLaunch(agent string) bool {
 	return agent == "claude"
 }
 
-// resumeCommandFragment returns the substring the agent's relaunch command must contain to
-// prove vibecast resumed the harvested session id, per adapter. claude resumes by id
-// (`claude --resume <id>`, buildClaudeResumeCommand); codex/pi add their own forms here when
-// they land (codex resumes a thread, pi a session id).
-func resumeCommandFragment(agent, priorID string) string {
+// resumeCommandFragments returns the substrings the agent's relaunch command must ALL contain
+// to prove vibecast resumed the harvested session id, per adapter. Each substring is checked
+// independently (order-independent) so the assertion survives new global flags being inserted
+// between the resume verb and the positional id — codex's grammar is `resume [OPTIONS] <id>`,
+// and OPTIONS grew (-c features…, -s danger-full-access) after this matcher was first written,
+// which a single contiguous fragment could not tolerate.
+//
+// claude resumes by id (`claude --resume <id>`, buildClaudeResumeCommand — the id trails the
+// flag directly). codex resumes a thread positionally (`codex resume [OPTIONS] <SESSION_ID>
+// [PROMPT]`), so assert BOTH the resume verb AND the harvested id (a unique UUIDv7 that appears
+// only as the positional resume target in the pane's start command). pi adds its form here when
+// it lands.
+func resumeCommandFragments(agent, priorID string) []string {
 	switch agent {
 	case "claude":
-		return "--resume " + priorID
+		return []string{"--resume " + priorID}
 	case "codex":
-		// codex resumes a thread positionally (`codex resume [OPTIONS] <SESSION_ID> [PROMPT]`),
-		// not via a --resume flag. The session id follows the always-present hook-trust flag on a
-		// no-system-prompt relaunch (C09 sets none), so this fragment proves the harvested id was
-		// named as the resume target.
-		return "resume --dangerously-bypass-hook-trust " + priorID
+		return []string{"resume", priorID}
 	default:
 		// Same as claude until a divergent adapter overrides it.
-		return "--resume " + priorID
+		return []string{"--resume " + priorID}
 	}
 }
 
