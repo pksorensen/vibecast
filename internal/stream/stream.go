@@ -500,6 +500,45 @@ func maybeStartChatChannel(sessionID, paneId string, status *types.SharedStatus)
 	go broadcast.ConnectChatChannel(jobID, sessionID, paneId, status)
 }
 
+// seedAgentConfig runs the selected agent's config-seed (codex: an isolated CODEX_HOME with
+// hooks.json + config.toml MCP/trust + workspace trust; claude/pi: no-op) and publishes the
+// returned env onto the tmux session so the agent pane picks it up. Called from BOTH StartStream
+// and ResumeStream's respawn branch — the latter is why a fresh `vibecast --resume` process after
+// a crash still seeds codex (SpawnPane launches the agent but does not seed).
+//
+// The load-bearing propagation is the `tmux set-environment` call: `tmux new-window` inherits the
+// SESSION environment, NOT this process's env (see the note at StartStream's OTEL block), so a
+// bare os.Setenv would never reach the pane. The os.Setenv here only gives the vibecast process
+// itself a consistent view for any subsequent same-process Start/Resume (idempotency), where
+// codexHomeIsVibecastSeeded then detects the already-seeded home and no-ops. A seed error is
+// logged, not fatal (the agent still launches, degraded). The conformance harness pre-seeds
+// CODEX_HOME, which Prepare detects and reuses, so this is a no-op there.
+func seedAgentConfig(sessionName string) {
+	ad, err := agent.Selected()
+	if err != nil {
+		logDebug("[stream] agent.Selected: %v\n", err)
+		return
+	}
+	baseDir := os.Getenv("VIBECAST_HOME")
+	if baseDir == "" {
+		baseDir, _ = os.Getwd()
+	}
+	vibecastPath, _ := os.Executable()
+	seedEnv, perr := ad.Prepare(agent.PrepareInput{
+		BaseDir:      baseDir,
+		Workspace:    resolveWorkDir(),
+		VibecastBin:  vibecastPath,
+		VibecastHome: os.Getenv("VIBECAST_HOME"),
+	})
+	if perr != nil {
+		logDebug("[stream] %s Prepare: %v\n", ad.Kind(), perr)
+	}
+	for k, v := range seedEnv {
+		os.Setenv(k, v)
+		exec.Command("tmux", "set-environment", "-t", sessionName, k, v).Run()
+	}
+}
+
 // SpawnPane creates a new tmux window, starts ttyd, launches Claude, and begins broadcast relay.
 func SpawnPane(sessionName, sessionID, paneId, name string, status *types.SharedStatus, claudeResumeID string) (*types.PaneInfo, error) {
 	claudeSessionID := util.GenerateUUIDv4()
@@ -710,34 +749,10 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 			return streamError(span, fmt.Errorf("failed to create tmux session: %w", err))
 		}
 
-		// Seed the selected agent's isolated config home (codex: CODEX_HOME with hooks.json +
-		// config.toml MCP/trust) so it fires vibecast's lifecycle hooks and can call the MCP
-		// completion tools. Claude/pi are no-ops. The returned env is set on BOTH this process
-		// (the agent pane is spawned with os.Environ, so this is what actually reaches it) and
-		// the tmux session (belt-and-suspenders, matching the other propagated vars). A seed
-		// failure is logged, not fatal — the agent still launches (degraded) rather than
-		// aborting the stream; an already-vibecast-seeded home (conformance harness) no-ops.
-		if ad, err := agent.Selected(); err != nil {
-			logDebug("[stream] agent.Selected: %v\n", err)
-		} else {
-			seedBaseDir := os.Getenv("VIBECAST_HOME")
-			if seedBaseDir == "" {
-				seedBaseDir = sessionDir
-			}
-			seedEnv, perr := ad.Prepare(agent.PrepareInput{
-				BaseDir:      seedBaseDir,
-				Workspace:    resolveWorkDir(),
-				VibecastBin:  vibecastPath,
-				VibecastHome: os.Getenv("VIBECAST_HOME"),
-			})
-			if perr != nil {
-				logDebug("[stream] %s Prepare: %v\n", ad.Kind(), perr)
-			}
-			for k, v := range seedEnv {
-				os.Setenv(k, v)
-				exec.Command("tmux", "set-environment", "-t", sessionName, k, v).Run()
-			}
-		}
+		// Seed the selected agent's isolated config home (codex: CODEX_HOME with hooks + MCP +
+		// trust; claude/pi: no-op) so it fires vibecast's lifecycle hooks and can call the MCP
+		// completion tools. See seedAgentConfig — set-environment is the load-bearing propagation.
+		seedAgentConfig(sessionName)
 
 		exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_SESSION_ID", sessionID).Run()
 		exec.Command("tmux", "set-environment", "-t", sessionName, "VIBECAST_BROADCAST_ID", broadcastID).Run()
@@ -1271,6 +1286,11 @@ func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 
 			// Bind F-keys at the tmux session level
 			BindFKeys(sessionName)
+
+			// Re-seed the agent config home before respawning: this fresh `--resume` process
+			// has no CODEX_HOME set, so without this codex would relaunch against the un-seeded
+			// real ~/.codex (no hooks, no MCP completion tools, possible folder-trust prompt).
+			seedAgentConfig(sessionName)
 
 			for _, pe := range paneEntries {
 				pane, err := SpawnPane(sessionName, sessionID, pe.PaneID, pe.PaneID, status, pe.ClaudeSessionID)
