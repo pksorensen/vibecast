@@ -15,14 +15,15 @@ const codexUUIDv7 = "019f4cf6-5e8d-7abc-8def-0123456789ab"
 
 // cxLaunch / cxResume are the invariant command prefixes every codex launch/resume carries:
 // hook-trust bypass + the two feature-disable overrides that keep vibecast's MCP tools in the
-// model's direct toolset (see codexMCPToolExposureFlags) + the -s danger-full-access sandbox
+// model's direct toolset (see codexMCPToolExposureFlags) + the plugins-off override (see
+// codexPluginDisableFlag — no per-launch marketplace clone) + the -s danger-full-access sandbox
 // posture (see codexSandboxFlag — the OS sandbox can't init in the runner container, so the
 // PreToolUse guard hook is the floor). These are spelled out as literals here — NOT imported
 // from the production const — so a regression in the production flag value (a typo, a dropped
 // flag, a re-enabled feature, a silently changed sandbox mode) breaks these golden assertions.
 const (
-	cxLaunch = "codex --dangerously-bypass-hook-trust -c features.tool_suggest=false -c features.tool_search_always_defer_mcp_tools=false -s danger-full-access"
-	cxResume = "codex resume --dangerously-bypass-hook-trust -c features.tool_suggest=false -c features.tool_search_always_defer_mcp_tools=false -s danger-full-access"
+	cxLaunch = "codex --dangerously-bypass-hook-trust -c features.tool_suggest=false -c features.tool_search_always_defer_mcp_tools=false -c features.plugins=false -s danger-full-access"
+	cxResume = "codex resume --dangerously-bypass-hook-trust -c features.tool_suggest=false -c features.tool_search_always_defer_mcp_tools=false -c features.plugins=false -s danger-full-access"
 )
 
 // TestCodexBuildCommandGolden pins the fresh-launch command strings. Codex launches with no
@@ -149,6 +150,12 @@ func TestCodexBuildCommandGolden(t *testing.T) {
 			}
 			if !strings.Contains(got, "-c features.tool_search_always_defer_mcp_tools=false") {
 				t.Errorf("command must disable tool_search_always_defer_mcp_tools to expose MCP tools directly: %q", got)
+			}
+			// Plugins are disabled so a fresh CODEX_HOME never stages a marketplace clone (a
+			// per-launch network/latency/failure surface, and the source of a temp-dir cleanup
+			// race in conformance). See codexPluginDisableFlag.
+			if !strings.Contains(got, "-c features.plugins=false") {
+				t.Errorf("command must disable the plugins feature (no per-launch marketplace clone): %q", got)
 			}
 		})
 	}

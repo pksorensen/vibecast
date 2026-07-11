@@ -88,6 +88,23 @@ const codexSandboxFlag = " -s danger-full-access"
 // the C07 conformance scenario.
 const codexMCPToolExposureFlags = " -c features.tool_suggest=false -c features.tool_search_always_defer_mcp_tools=false"
 
+// codexPluginDisableFlag turns off codex's plugin feature for vibecast-launched sessions
+// (`-c features.plugins=false`, the dotted-override equivalent of `--disable plugins`).
+//
+// On startup in a fresh CODEX_HOME — which every vibecast-managed session gets — codex stages
+// its plugin marketplace into `$CODEX_HOME/.tmp/plugins-clone-XXXX/` via a detached git clone.
+// For an unattended ALP Operator that is pure downside: a per-launch network dependency + latency
+// + failure surface + uncontrolled third-party code, none of which the station wants (vibecast
+// controls the station via its system prompt, MCP tools, and hooks — not the user's plugins).
+//
+// It also removed a real conformance flake: the background clone kept writing under the test's
+// t.TempDir() after the scenario ended, so Go's auto-RemoveAll raced it and failed the test with
+// "directory not empty" (observed on C05/C09-adjacent C03 runs). Disabling the feature means the
+// `.tmp` staging dir is never created (verified: `.tmp` present with plugins on, absent with it
+// off), so cleanup is deterministic. Same `-c features.*` idiom as codexMCPToolExposureFlags, so
+// it composes with any real user [features] table.
+const codexPluginDisableFlag = " -c features.plugins=false"
+
 // codexJobModeInstructions is a developer-instructions preamble carried by every
 // vibecast-launched codex running in job mode (AGENTICS_JOB_MODE=1 → LaunchSpec.JobMode). It
 // bridges codex's tool model to vibecast's Operator completion contract: the job is done only
@@ -111,7 +128,7 @@ func (codexAdapter) BinaryName() string          { return "codex" }
 func (codexAdapter) DiscoversOwnSessionID() bool { return true }
 
 func (codexAdapter) BuildCommand(binPath string, spec LaunchSpec) (string, error) {
-	cmd := binPath + codexHookTrustFlag + codexMCPToolExposureFlags + codexSandboxFlag
+	cmd := binPath + codexHookTrustFlag + codexMCPToolExposureFlags + codexPluginDisableFlag + codexSandboxFlag
 	cmd += codexModelFlag(spec.Model, spec.ModelTier)
 	cmd += codexDeveloperInstructionsFlag(spec.SystemPromptFile, spec.SystemPromptInline, spec.JobMode)
 	cmd += codexInitialPromptArg(spec.InitialPromptFile)
@@ -122,12 +139,12 @@ func (codexAdapter) BuildResumeCommand(binPath string, spec LaunchSpec, agentSes
 	devInstr := codexDeveloperInstructionsFlag(spec.SystemPromptFile, spec.SystemPromptInline, spec.JobMode)
 	initialPrompt := codexInitialPromptArg(spec.InitialPromptFile)
 	if agentSessionID != "" && util.IsUUID(agentSessionID) {
-		return binPath + " resume" + codexHookTrustFlag + codexMCPToolExposureFlags + codexSandboxFlag + devInstr + " " + agentSessionID + initialPrompt, nil
+		return binPath + " resume" + codexHookTrustFlag + codexMCPToolExposureFlags + codexPluginDisableFlag + codexSandboxFlag + devInstr + " " + agentSessionID + initialPrompt, nil
 	}
 	if agentSessionID != "" {
 		logDebug("[codex-cmd] dropping resume %q: not a UUID, falling back to --last\n", agentSessionID)
 	}
-	return binPath + " resume" + codexHookTrustFlag + codexMCPToolExposureFlags + codexSandboxFlag + devInstr + " --last" + initialPrompt, nil
+	return binPath + " resume" + codexHookTrustFlag + codexMCPToolExposureFlags + codexPluginDisableFlag + codexSandboxFlag + devInstr + " --last" + initialPrompt, nil
 }
 
 // codexModelFlag maps the per-station model config to `codex -m <model>`. Codex model names
