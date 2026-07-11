@@ -78,6 +78,33 @@ func TestPiBuildCommandGolden(t *testing.T) {
 			spec: LaunchSpec{Model: "pks-foundry/gpt-5.5", SystemPromptFile: "/tmp/sys.txt"},
 			want: "pi --model 'pks-foundry/gpt-5.5' --append-system-prompt \"$(cat '/tmp/sys.txt')\"",
 		},
+		{
+			// Job mode with no station prompt: the stop_broadcast mandate rides alone in
+			// --append-system-prompt (single-quoted; the mandate is ASCII-safe). The C07 path —
+			// without it the model finishes without calling the native stop_broadcast tool.
+			name: "job mode injects stop_broadcast mandate (no station prompt)",
+			spec: LaunchSpec{JobMode: true},
+			want: "pi --append-system-prompt '" + piJobModeInstructions + "'",
+		},
+		{
+			// Job mode + inline station prompt: mandate PREPENDED, station prose after a blank line.
+			name: "job mode prepends mandate before inline station prompt",
+			spec: LaunchSpec{JobMode: true, SystemPromptInline: "be terse"},
+			want: "pi --append-system-prompt '" + piJobModeInstructions + "\n\nbe terse'",
+		},
+		{
+			// Job mode + station prompt FILE: double-quoted so $(cat ...) still expands, mandate literal before it.
+			name: "job mode prepends mandate before station prompt file",
+			spec: LaunchSpec{JobMode: true, SystemPromptFile: "/tmp/sys.txt"},
+			want: "pi --append-system-prompt \"" + piJobModeInstructions + "\n\n$(cat '/tmp/sys.txt')\"",
+		},
+		{
+			// Not job mode: no mandate (mandating stop_broadcast in an interactive broadcast would
+			// end the stream after one task).
+			name: "interactive (non-job) mode carries no mandate",
+			spec: LaunchSpec{SystemPromptInline: "be terse"},
+			want: "pi --append-system-prompt 'be terse'",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,6 +125,24 @@ func TestPiBuildCommandGolden(t *testing.T) {
 				t.Errorf("pi has no permission system — no --dangerously-* flag belongs here: %q", got)
 			}
 		})
+	}
+}
+
+// TestPiJobModeInstructions guards the load-bearing SEMANTICS of the job-mode mandate independently
+// of its exact wording (which the golden tests pin verbatim via the constant): it must name the
+// stop_broadcast completion tool, mandate the call, and — so it rides safely inside both shell-quoting
+// forms — contain no character that would break out of a single- or double-quoted value.
+func TestPiJobModeInstructions(t *testing.T) {
+	m := piJobModeInstructions
+	for _, tok := range []string{"stop_broadcast", "MUST", "conclusion"} {
+		if !strings.Contains(m, tok) {
+			t.Errorf("job-mode mandate missing load-bearing token %q", tok)
+		}
+	}
+	for _, bad := range []string{"'", "\"", "$", "`", "\\", "!"} {
+		if strings.Contains(m, bad) {
+			t.Errorf("job-mode mandate contains shell-unsafe %q — must stay ASCII-quote-safe", bad)
+		}
 	}
 }
 

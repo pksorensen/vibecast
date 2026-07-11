@@ -830,7 +830,10 @@ func replReadyMarker(agent string) string {
 // such event exists until AFTER the prompt is typed, so C11 falls back to the REPL readiness
 // marker (replReadyMarker) alone to know the TUI has captured the PTY.
 func firesSessionStartAtLaunch(agent string) bool {
-	return agent == "claude"
+	// claude fires its SessionStart hook at launch; pi fires session_start (reason=startup) at
+	// launch too (via the vibecast extension). codex is the exception — it emits no SessionStart at
+	// idle, only once a prompt is submitted — so it must gate REPL readiness on replReadyMarker.
+	return agent == "claude" || agent == "pi"
 }
 
 // resumeCommandFragments returns the substrings the agent's relaunch command must ALL contain
@@ -851,6 +854,11 @@ func resumeCommandFragments(agent, priorID string) []string {
 		return []string{"--resume " + priorID}
 	case "codex":
 		return []string{"resume", priorID}
+	case "pi":
+		// pi resumes a session by UUID positionally after `--session` (0.73.1; --session-id is
+		// ≥0.76/Node22), with `--continue` as the no-id fallback. Assert the flag + the harvested id
+		// order-independently.
+		return []string{"--session", priorID}
 	default:
 		// Same as claude until a divergent adapter overrides it.
 		return []string{"--resume " + priorID}

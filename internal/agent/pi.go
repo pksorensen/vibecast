@@ -43,14 +43,14 @@ func (piAdapter) DiscoversOwnSessionID() bool { return true }
 func (piAdapter) BuildCommand(binPath string, spec LaunchSpec) (string, error) {
 	cmd := binPath
 	cmd += piModelFlag(spec.Model, spec.ModelTier)
-	cmd += piAppendSystemPromptFlag(spec.SystemPromptFile, spec.SystemPromptInline)
+	cmd += piAppendSystemPromptFlag(spec.SystemPromptFile, spec.SystemPromptInline, spec.JobMode)
 	cmd += piInitialPromptArg(spec.InitialPromptFile)
 	return cmd, nil
 }
 
 func (piAdapter) BuildResumeCommand(binPath string, spec LaunchSpec, agentSessionID string) (string, error) {
 	modelFlag := piModelFlag(spec.Model, spec.ModelTier)
-	promptFlag := piAppendSystemPromptFlag(spec.SystemPromptFile, spec.SystemPromptInline)
+	promptFlag := piAppendSystemPromptFlag(spec.SystemPromptFile, spec.SystemPromptInline, spec.JobMode)
 	initialPrompt := piInitialPromptArg(spec.InitialPromptFile)
 	if agentSessionID != "" && util.IsUUID(agentSessionID) {
 		return binPath + modelFlag + promptFlag + " --session " + agentSessionID + initialPrompt, nil
@@ -80,17 +80,42 @@ func piModelFlag(model, tier string) string {
 // pi appends (does not replace — that is --system-prompt, deliberately avoided). File-first to
 // avoid shell-quoting issues with special chars/JSON, read at exec via "$(cat 'path')" — the same
 // shape as claudeAppendSystemPromptFlag. Empty → no flag.
-func piAppendSystemPromptFlag(file, inline string) string {
+//
+// In job mode (jobMode) the piJobModeInstructions mandate is PREPENDED to whatever station prompt
+// is present, separated by a blank line, so the model is told to call the stop_broadcast tool as
+// its final action (C07). Mandate-only when no station prompt. The mandate is ASCII-quote-safe, so
+// it rides literally inside both the double-quoted (file) and single-quoted (inline) shell forms.
+func piAppendSystemPromptFlag(file, inline string, jobMode bool) string {
+	preamble := ""
+	if jobMode {
+		preamble = piJobModeInstructions
+	}
 	if file != "" {
 		escapedPath := strings.ReplaceAll(file, "'", "'\"'\"'")
+		if preamble != "" {
+			return " --append-system-prompt \"" + preamble + "\n\n$(cat '" + escapedPath + "')\""
+		}
 		return " --append-system-prompt \"$(cat '" + escapedPath + "')\""
 	}
 	if inline != "" {
 		escaped := strings.ReplaceAll(inline, "'", "'\"'\"'")
+		if preamble != "" {
+			return " --append-system-prompt '" + preamble + "\n\n" + escaped + "'"
+		}
 		return " --append-system-prompt '" + escaped + "'"
+	}
+	if preamble != "" {
+		return " --append-system-prompt '" + preamble + "'"
 	}
 	return ""
 }
+
+// piJobModeInstructions is the job-mode system-prompt preamble that bridges pi to vibecast's
+// Operator completion contract: the job is done only when the agent calls the stop_broadcast tool
+// (registered natively by the vibecast pi extension — pi has no MCP). Job-mode-gated on purpose;
+// mandating stop_broadcast in an interactive broadcast would end the stream after the first task.
+// Kept ASCII-quote-safe (no ' " $ ` \ !) so it rides inside both shell-quoting forms above.
+const piJobModeInstructions = "VIBECAST JOB MODE. This is an unattended broadcast job. Your broadcast lifecycle tool stop_broadcast is available directly in your tool list. When the job is complete, your final action MUST be to call stop_broadcast with a conclusion (for example conclusion=success) and a one-line summary message. Never end the session without calling stop_broadcast."
 
 // piInitialPromptArg passes the initial job prompt as a positional argument, read from the file so
 // multi-line content survives without shell-escaping or send-keys timing. The positional prompt

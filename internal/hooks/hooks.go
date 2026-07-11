@@ -644,7 +644,9 @@ func handleHookGuard() {
 	if err := json.Unmarshal(stdinData, &in); err != nil {
 		os.Exit(0)
 	}
-	if in.ToolName != "Bash" || in.ToolInput.Command == "" {
+	// Match the shell tool case-insensitively: claude/codex name it "Bash", pi names it "bash".
+	// The process-kill guard is about shell commands regardless of the agent's casing.
+	if !strings.EqualFold(in.ToolName, "Bash") || in.ToolInput.Command == "" {
 		os.Exit(0)
 	}
 	bad, form := dangerousProcessKill(in.ToolInput.Command)

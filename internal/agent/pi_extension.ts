@@ -49,6 +49,49 @@ export default function (pi: any) {
 		}
 	}
 
+	// stop_broadcast native tool. pi has no MCP, so vibecast's job-completion control tool is
+	// registered as a NATIVE pi tool (the codex-MCP analog). When the agent calls it, we exec
+	// `vibecast stop-broadcast` — which POSTs to vibecast's control socket exactly like the CLI/MCP
+	// path — ending the broadcast with the given conclusion + summary. The job-mode system-prompt
+	// mandate (piJobModeInstructions) tells the model to call it as its final action (C07).
+	// Loaded defensively: if typebox isn't resolvable in this pi version, stop_broadcast is skipped
+	// but every other hook still works.
+	try {
+		const { Type } = require("typebox");
+		pi.registerTool({
+			name: "stop_broadcast",
+			label: "Stop Broadcast",
+			description:
+				"End the vibecast broadcast for this job. Call this as your FINAL action when the job is complete, passing a conclusion and a one-line summary message.",
+			parameters: Type.Object({
+				conclusion: Type.String({ description: "Job conclusion, e.g. \"success\" or \"failure\"" }),
+				message: Type.String({ description: "One-line summary of what was accomplished" }),
+			}),
+			async execute(_toolCallId: any, params: any) {
+				const conclusion = String(params?.conclusion || "success");
+				const message = String(params?.message || "");
+				let ok = false;
+				let err = "";
+				try {
+					const r = spawnSync(bin, ["stop-broadcast", "--conclusion", conclusion, "--message", message], {
+						encoding: "utf8",
+						timeout: 15000,
+					});
+					ok = !!r && r.status === 0;
+					err = (r && r.stderr) || "";
+				} catch (e: any) {
+					err = String(e);
+				}
+				return {
+					content: [{ type: "text", text: ok ? "Broadcast stopped." : "stop_broadcast failed: " + err }],
+					details: { conclusion, ok },
+				};
+			},
+		});
+	} catch {
+		/* typebox unavailable — stop_broadcast unregistered; other hooks unaffected */
+	}
+
 	// session_start (reason: startup|resume|new|reload|fork) → `hook session`. This is the
 	// discover-identity path: session_id is pi's own UUIDv7, which the handler records back into
 	// the vibecast session file. Fires at launch AND on resume — the C01/C02 registration signal.

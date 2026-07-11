@@ -178,11 +178,19 @@ func preparePiConfig(baseDir, workspace, vibecastBin string) (map[string]string,
 	// env (apiKey field names the var). Proven standalone: `pi --model pks-foundry/gpt-5.5` returns
 	// a Foundry response through this proxy. With no proxy, pi launches keyless (C01/C02 only).
 	if piFoundryURL != "" {
+		// api=openai-completions (Chat Completions), NOT openai-responses. gpt-5.5 is a reasoning
+		// model and Azure Foundry's Responses API only persists reasoning items when store=true —
+		// but pi's Responses client hardcodes store=false (its supportsStore compat flag, confusingly,
+		// only ever sets store=false). So any follow-up turn that references a prior reasoning item
+		// 400s: "Items are not persisted when store is set to false." C08's blocked pkill forces
+		// exactly that second turn. Chat Completions is stateless by design (no server-side
+		// reasoning-item persistence to reference), so it avoids the issue entirely — verified it
+		// handles the multi-turn tool path against Foundry gpt-5.5.
 		modelsJSON := fmt.Sprintf(`{
   "providers": {
     "pks-foundry": {
       "baseUrl": %q,
-      "api": "openai-responses",
+      "api": "openai-completions",
       "apiKey": "FOUNDRY_PROXY_TOKEN",
       "authHeader": true,
       "models": [ { "id": "gpt-5.5" } ]
