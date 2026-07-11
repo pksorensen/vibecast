@@ -38,6 +38,21 @@ type ChatMsg struct {
 	Count     int    `json:"count,omitempty"`
 }
 
+// ChatChannelMsg is the Chat Channel wire envelope for chat-session:v1 (ALP spec
+// external/alp-spec/2026-03-30-draft/spec/13-chat.md, Kind A). One JSON object per WS
+// text frame. Type is one of:
+//   - "chat.message" — Server -> Operator, one user turn
+//   - "chat.reply"   — Operator -> Server, one assistant turn (sent via the chat_reply MCP tool)
+//   - "chat.end"     — either direction, ends the chat session
+//
+// This is distinct from the older, unrelated live-viewer ChatMsg/"/api/lives/chat/ws" feature.
+type ChatChannelMsg struct {
+	Type   string `json:"type"`
+	JobID  string `json:"jobId"`
+	Text   string `json:"text,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // PendingImage represents an image awaiting approval.
 type PendingImage struct {
 	ImageID   string `json:"imageId"`
@@ -83,6 +98,15 @@ type SharedStatus struct {
 	ServerHost      string
 	ServerConn      net.Conn
 	OtelShutdown    func()
+	// Chat Channel (chat-session:v1, ALP spec 13-chat.md) — the outbound WS connection to
+	// the Server, opened once per process for a chat-kind Job (see broadcast.ConnectChatChannel).
+	// Guarded by Mu like ServerConn. The chat_reply MCP tool's control-socket handler
+	// (control.go's /chat-reply) reads ChatChannelConn/ChatJobID directly to send a
+	// chat.reply frame back across the channel — the MCP server runs as a separate stdio
+	// process, so it cannot hold the connection itself.
+	ChatChannelConn    net.Conn
+	ChatJobID          string
+	ChatChannelStarted bool
 	// Extra attributes and plugin names passed via --attr / --plugin flags
 	Attrs       map[string]string
 	PluginNames []string

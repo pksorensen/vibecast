@@ -22,6 +22,7 @@ func (claudeAdapter) BuildCommand(binPath string, spec LaunchSpec) (string, erro
 	cmd += claudePluginFlags(spec.PluginDirs)
 	cmd += claudeModelFlag(spec.Model, spec.ModelTier)
 	cmd += claudeEffortFlag(spec.Effort)
+	cmd += claudeDevChannelFlag()
 	cmd += claudeAppendSystemPromptFlag(spec.SystemPromptFile, spec.SystemPromptInline)
 	cmd += claudeInitialPromptArg(spec.InitialPromptFile)
 	cmd += claudeSessionIDFlag(spec.AgentSessionID)
@@ -32,15 +33,16 @@ func (claudeAdapter) BuildResumeCommand(binPath string, spec LaunchSpec, agentSe
 	pluginFlags := claudePluginFlags(spec.PluginDirs)
 	modelFlag := claudeModelFlag(spec.Model, spec.ModelTier)
 	effortFlag := claudeEffortFlag(spec.Effort)
+	channelFlag := claudeDevChannelFlag()
 	promptFlag := claudeAppendSystemPromptFlag(spec.SystemPromptFile, spec.SystemPromptInline)
 	initialPrompt := claudeInitialPromptArg(spec.InitialPromptFile)
 	if agentSessionID != "" && util.IsUUIDv4(agentSessionID) {
-		return binPath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + promptFlag + " --resume " + agentSessionID + initialPrompt, nil
+		return binPath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + channelFlag + promptFlag + " --resume " + agentSessionID + initialPrompt, nil
 	}
 	if agentSessionID != "" {
 		logDebug("[claude-cmd] dropping --resume %q: not a UUIDv4, falling back to --continue\n", agentSessionID)
 	}
-	return binPath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + promptFlag + " --continue" + initialPrompt, nil
+	return binPath + " --dangerously-skip-permissions" + pluginFlags + modelFlag + effortFlag + channelFlag + promptFlag + " --continue" + initialPrompt, nil
 }
 
 func claudePluginFlags(dirs []string) string {
@@ -135,6 +137,19 @@ func claudeEffortFlag(effort string) string {
 		return ""
 	}
 	return " --effort " + e
+}
+
+// claudeDevChannelFlag maps VIBECAST_CLAUDE_CHANNEL to `claude --dangerously-load-development-channels
+// <value>`. Set by the Runner's launch script when this session is a devcontainer-hosted devagent
+// session with a `.mcp.json` agent-share entry already written (plan `snappy-wandering-mochi` Phase 3) —
+// empty → no flag. Kept out of claude_test.go's golden strings (unset in tests → no-op).
+func claudeDevChannelFlag() string {
+	channel := strings.TrimSpace(os.Getenv("VIBECAST_CLAUDE_CHANNEL"))
+	if channel == "" {
+		return ""
+	}
+	escaped := strings.ReplaceAll(channel, "'", "'\"'\"'")
+	return " --dangerously-load-development-channels '" + escaped + "'"
 }
 
 var agentDebug = os.Getenv("VIBECAST_DEBUG") != ""

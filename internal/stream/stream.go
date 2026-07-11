@@ -478,6 +478,28 @@ func paneDimensions() (string, string) {
 	return cols, rows
 }
 
+// maybeStartChatChannel opens the Operator Chat Channel (chat-session:v1) for the main
+// pane when AGENTICS_CHAT_SESSION=1 and a job id is present. Started at most once per
+// stream (guarded by SharedStatus.ChatChannelStarted). No-op for aux panes or when the
+// feature flag / job id is absent, so the default single-agent broadcast is unchanged.
+func maybeStartChatChannel(sessionID, paneId string, status *types.SharedStatus) {
+	if paneId != "main" || os.Getenv("AGENTICS_CHAT_SESSION") != "1" {
+		return
+	}
+	jobID := os.Getenv("AGENTICS_JOB_ID")
+	if jobID == "" || status == nil {
+		return
+	}
+	status.Mu.Lock()
+	if status.ChatChannelStarted {
+		status.Mu.Unlock()
+		return
+	}
+	status.ChatChannelStarted = true
+	status.Mu.Unlock()
+	go broadcast.ConnectChatChannel(jobID, sessionID, paneId, status)
+}
+
 // SpawnPane creates a new tmux window, starts ttyd, launches Claude, and begins broadcast relay.
 func SpawnPane(sessionName, sessionID, paneId, name string, status *types.SharedStatus, claudeResumeID string) (*types.PaneInfo, error) {
 	claudeSessionID := util.GenerateUUIDv4()
@@ -593,6 +615,8 @@ func SpawnPane(sessionName, sessionID, paneId, name string, status *types.Shared
 	metaCh := make(chan []byte, 16)
 
 	go broadcast.ConnectBroadcast(sessionID, status, metaCh, ttydPort, paneId)
+
+	maybeStartChatChannel(sessionID, paneId, status)
 
 	// Update pane tracking in SharedStatus
 	if status != nil {
@@ -1158,6 +1182,8 @@ func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 
 				metaCh := make(chan []byte, 16)
 				go broadcast.ConnectBroadcast(sessionID, status, metaCh, ttydPort, pe.PaneID)
+
+				maybeStartChatChannel(sessionID, pe.PaneID, status)
 
 				pane := &types.PaneInfo{
 					PaneId:          pe.PaneID,

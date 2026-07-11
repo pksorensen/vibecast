@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -32,6 +34,38 @@ import (
 
 var ansiRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[A-Za-z]|[^[]|][^\x07]*\x07)`)
 var urlRE = regexp.MustCompile(`https?://[^\s\x00-\x1f"'<>\x1b\\]{10,}`)
+
+// tmuxSendLocks holds one *sync.Mutex per tmux pane target (e.g.
+// "vibecast-<sessionID>:<paneId>.0"), lazily created on first use. Several independent
+// goroutines can inject keystrokes into the very same running Claude Code pane: the
+// onboarding/trust auto-answer loops in connectBroadcastOnce, the jobMode answer-injection
+// goroutine (permission/alp_pane/tool answers), the live-viewer keyboard relay
+// (handleKeyboardInput), and connectChatChannelOnce's chat.message injection. Each of
+// these is itself a short *sequence* of "tmux send-keys" calls (e.g. a digit, a settle
+// sleep, then Enter) that must land on the pane back-to-back. Without serializing across
+// all of them, two goroutines can interleave their send-keys calls into the same pane and
+// corrupt both in-flight inputs (a half-answered permission prompt colliding with a chat
+// turn, for example). Callers must hold the lock for the whole logical injection, not just
+// a single exec.Command.
+var (
+	tmuxSendLocksMu sync.Mutex
+	tmuxSendLocks   = map[string]*sync.Mutex{}
+)
+
+// lockTmuxTarget locks (creating if needed) the mutex for the given tmux pane target and
+// returns the unlock function. Usage: `defer lockTmuxTarget(target)()` around every
+// send-keys sequence that targets that pane.
+func lockTmuxTarget(target string) func() {
+	tmuxSendLocksMu.Lock()
+	m, ok := tmuxSendLocks[target]
+	if !ok {
+		m = &sync.Mutex{}
+		tmuxSendLocks[target] = m
+	}
+	tmuxSendLocksMu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
 
 // isLocalURL returns true for URLs pointing at the loopback interface or
 // other unroutable hosts that aren't useful to broadcast to viewers.
@@ -256,12 +290,20 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 	// Also handles auto-answering the Claude Code workspace trust dialog in job mode
 	// and detects the "session is too large" context-size menu to broadcast as a vote card.
 	jobMode := os.Getenv("AGENTICS_JOB_MODE") == "1"
-	trustAnsweredSnap := false
+	// Shared across the snap-loop goroutine (below) AND the ttyd-relay goroutine
+	// (~line 1125) — both independently poll the pane and can auto-answer the
+	// trust dialog. A stray "Enter" from whichever loop answers second can arrive
+	// late and land on the NEXT screen (tour/bypass-permissions), hitting its
+	// default "No/exit" option and killing Claude. One shared flag makes the
+	// dialog answerable exactly once, no matter which goroutine sees it first.
+	var trustDialogAnswered atomic.Bool
 	themeAnsweredSnap := false
 	loginAnsweredSnap := false
 	loginSuccessAnsweredSnap := false
 	securityNotesAnsweredSnap := false
 	bypassAnsweredSnap := false
+	tourAnsweredSnap := false
+	apiKeyGateAnsweredSnap := false
 	// Track posted alp_pane question so we only post once per session-size menu appearance.
 	postedPaneQuestionId := ""
 	// Track posted onboarding_external question so we only surface the OAuth gate once per URL.
@@ -424,7 +466,7 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 			// In job mode, check for the workspace trust dialog in the rendered screen.
 			// Spawn mode owns the workspace (runner created the volume + clone) so VIBECAST_ALLOWED_DIRECTORIES
 			// isn't set and we trust unconditionally. In-process mode passes the explicit allowed dir for safety.
-			if jobMode && !trustAnsweredSnap {
+			if jobMode && !trustDialogAnswered.Load() {
 				if strings.Contains(rendered, "Quick safety check") {
 					allowedDir := os.Getenv("VIBECAST_ALLOWED_DIRECTORIES")
 					_, span := telemetry.Tracer().Start(
@@ -441,10 +483,13 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 						// The trust dialog defaults to "❯ 1. Yes, I trust this folder".
 						// Send Enter alone — sending "1" + Enter in one call doesn't
 						// register reliably in BubbleTea; Enter on the default is enough.
-						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+						func() {
+							defer lockTmuxTarget(snapTmuxTarget + ".0")()
+							tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+						}()
 						logDebug("[broadcast] auto-answered workspace trust prompt (allowedDir=%q)\n", allowedDir)
 						span.SetAttributes(attribute.Bool("auto_answered", true))
-						trustAnsweredSnap = true
+						trustDialogAnswered.Store(true)
 					} else {
 						logDebug("[broadcast] trust prompt path does not match allowed dir %q — not auto-answering\n", allowedDir)
 						span.SetAttributes(attribute.Bool("auto_answered", false))
@@ -469,7 +514,10 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 				// No real choice — just dismiss with Enter.
 				if !loginSuccessAnsweredSnap && strings.Contains(plain, "Login successful") &&
 					strings.Contains(plain, "Press Enter to continue") {
-					tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					func() {
+						defer lockTmuxTarget(snapTmuxTarget + ".0")()
+						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					}()
 					logDebug("[broadcast] auto-answered post-OAuth login-successful screen\n")
 					loginSuccessAnsweredSnap = true
 				}
@@ -477,7 +525,10 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 				// + "prompt injection risks" + "Press Enter to continue". No real choice.
 				if !securityNotesAnsweredSnap && strings.Contains(plain, "Security notes") &&
 					strings.Contains(plain, "Press Enter to continue") {
-					tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					func() {
+						defer lockTmuxTarget(snapTmuxTarget + ".0")()
+						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					}()
 					logDebug("[broadcast] auto-answered security-notes screen\n")
 					securityNotesAnsweredSnap = true
 				}
@@ -486,11 +537,70 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 				// by design, so explicitly accept option 2 ("Yes, I accept"). Send the digit then Enter.
 				if !bypassAnsweredSnap && strings.Contains(plain, "Bypass Permissions mode") &&
 					strings.Contains(plain, "Yes, I accept") {
-					tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "2").Run()
-					time.Sleep(100 * time.Millisecond)
-					tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					func() {
+						defer lockTmuxTarget(snapTmuxTarget + ".0")()
+						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "2").Run()
+						time.Sleep(100 * time.Millisecond)
+						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					}()
 					logDebug("[broadcast] auto-answered bypass-permissions warning (option 2 — accept)\n")
 					bypassAnsweredSnap = true
+				}
+
+				// Custom-API-key gate — appears when ANTHROPIC_API_KEY is set in the
+				// environment (a real key or the pks-agent-gateway LLM sim forwarded by
+				// the runner). Screen (claude 2.1.207):
+				//
+				//   Detected a custom API key in your environment
+				//   ANTHROPIC_API_KEY: sk-ant-...xxxx
+				//   Do you want to use this API key?
+				//     1. Yes
+				//   ❯ 2. No (recommended)
+				//
+				// Default highlight is "2. No" — a blind Enter would REJECT the key and
+				// fall through to the login picker. The key was deliberately provided by
+				// the runner env, so explicitly select "1. Yes" (digit then Enter, same
+				// style as the bypass-permissions handler).
+				if !apiKeyGateAnsweredSnap && strings.Contains(plain, "Detected a custom API key") &&
+					strings.Contains(plain, "use this API key?") {
+					func() {
+						defer lockTmuxTarget(snapTmuxTarget + ".0")()
+						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "1").Run()
+						time.Sleep(100 * time.Millisecond)
+						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					}()
+					logDebug("[broadcast] auto-answered custom-API-key gate (option 1 — use env key)\n")
+					apiKeyGateAnsweredSnap = true
+				}
+
+				// "Learn the moves" onboarding tour gate — appears on first run of newer
+				// Claude Code versions (e.g. v2.1.205+) as a full-screen menu offering an
+				// interactive tour before the REPL is usable. No real choice in job mode:
+				// default highlight is "1. Take the tour" (interactive, would hang forever
+				// with no human to click through it), so explicitly select "2. Skip for now".
+				//
+				// Unlike the trust/bypass-permissions dialogs, this menu appears to dismiss
+				// itself on the digit keypress alone (no Enter required) — sending a trailing
+				// Enter unconditionally was landing late on the NEXT screen (bypass-permissions,
+				// default "1. No, exit") and killing Claude (observed: session fajijlqi died
+				// immediately after this handler fired, before any bypass-permissions log line).
+				// Re-check the pane after the digit and only send Enter if this screen is
+				// still showing — i.e. it actually needed confirming.
+				if !tourAnsweredSnap && strings.Contains(plain, "Learn the moves") &&
+					strings.Contains(plain, "Skip for now") {
+					func() {
+						defer lockTmuxTarget(snapTmuxTarget + ".0")()
+						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "2").Run()
+						time.Sleep(100 * time.Millisecond)
+						if out, err := tmuxCmd("capture-pane", "-p", "-t", snapTmuxTarget+".0").Output(); err == nil {
+							still := ansiStripRe.ReplaceAllString(string(out), "")
+							if strings.Contains(still, "Learn the moves") && strings.Contains(still, "Skip for now") {
+								tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+							}
+						}
+					}()
+					logDebug("[broadcast] auto-answered onboarding tour gate (option 2 — skip)\n")
+					tourAnsweredSnap = true
 				}
 
 				// Helper for posting an alp_pane vote question. Server stores it on the task
@@ -518,6 +628,19 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 				}
 				// Theme picker — surface as a team-vote question. Options match Claude's menu
 				// ORDER 1..7 so the alp_pane injector's "digit by index" maps correctly.
+				// Exception: when ANTHROPIC_API_KEY is set the job is fully automated
+				// (gateway LLM sim or runner-forwarded key — no human is expected to
+				// vote), so accept the highlighted default theme instead of stalling
+				// the job on a dashboard vote. Cosmetic either way in job mode.
+				if !themeAnsweredSnap && strings.Contains(plain, "Choose the text style") &&
+					os.Getenv("ANTHROPIC_API_KEY") != "" {
+					func() {
+						defer lockTmuxTarget(snapTmuxTarget + ".0")()
+						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					}()
+					logDebug("[broadcast] auto-answered theme picker (env API key set — accepting default)\n")
+					themeAnsweredSnap = true
+				}
 				if !themeAnsweredSnap && strings.Contains(plain, "Choose the text style") {
 					postAlpPaneQuestion(
 						fmt.Sprintf("onboarding-theme:%s", sessionID),
@@ -1026,7 +1149,14 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 						}
 					}
 					if selected != nil {
-						selected.inject(injectCtx, injectSpan, injectionTarget, answer, r.Options, r.MultiSelect, r.SubQuestions)
+						// Hold the pane lock for the entire injection (which may itself be a
+						// multi-key sequence, e.g. digit + sleep + Enter) so it can't interleave
+						// with the trust/onboarding auto-answer loops, the keyboard relay, or
+						// connectChatChannelOnce's chat.message injection racing on the same pane.
+						func() {
+							defer lockTmuxTarget(injectionTarget)()
+							selected.inject(injectCtx, injectSpan, injectionTarget, answer, r.Options, r.MultiSelect, r.SubQuestions)
+						}()
 					} else {
 						logDebug("[answer] no handler for questionType=%s\n", r.QuestionType)
 						injectSpan.SetAttributes(attribute.String("inject.method", "no_handler"))
@@ -1052,7 +1182,6 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 	// and auto-answers the Claude Code workspace trust dialog in job mode.
 	seenURLs := map[string]bool{}
 	var urlBuf strings.Builder
-	trustAnswered := false
 	var lastCaptureCheck time.Time
 	go func() {
 		defer close(done)
@@ -1100,7 +1229,7 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 					// VT100 stream doesn't contain "Quick safety check" as a contiguous
 					// string. Use tmux capture-pane (rendered screen text) instead,
 					// debounced to at most once per 500ms to avoid excess subprocess calls.
-					if jobMode && !trustAnswered && time.Since(lastCaptureCheck) > 500*time.Millisecond {
+					if jobMode && !trustDialogAnswered.Load() && time.Since(lastCaptureCheck) > 500*time.Millisecond {
 						lastCaptureCheck = time.Now()
 						target := fmt.Sprintf("vibecast-%s:%s.0", sessionID, paneId)
 						rendered, captureErr := tmuxCmd("capture-pane", "-p", "-t", target).Output()
@@ -1121,10 +1250,13 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 								// explicitly allowed dir (in-process mode). Mirrors the snapshot-loop
 								// handler above; the two must agree or they race and one refuses.
 								if allowedDir == "" || strings.Contains(renderedStr, allowedDir) {
-									tmuxCmd("send-keys", "-t", target, "Enter").Run()
+									func() {
+										defer lockTmuxTarget(target)()
+										tmuxCmd("send-keys", "-t", target, "Enter").Run()
+									}()
 									logDebug("[broadcast] auto-answered workspace trust prompt (allowedDir=%q)\n", allowedDir)
 									span.SetAttributes(attribute.Bool("auto_answered", true))
-									trustAnswered = true
+									trustDialogAnswered.Store(true)
 								} else {
 									logDebug("[broadcast] trust prompt path does not match allowed dir %q — not auto-answering\n", allowedDir)
 									span.SetAttributes(attribute.Bool("auto_answered", false))
@@ -1209,8 +1341,11 @@ func handleKeyboardInput(payload []byte, expectedPinHash, tmuxSession, paneId st
 	tmuxTarget := tmuxSession + ":" + targetPane + ".0"
 
 	if msg.Type == "input" && msg.Data != "" && len(msg.Data) < 4096 {
+		unlock := lockTmuxTarget(tmuxTarget)
 		cmd := exec.Command("tmux", "send-keys", "-t", tmuxTarget, "-l", "--", msg.Data)
-		if err := cmd.Run(); err != nil {
+		err := cmd.Run()
+		unlock()
+		if err != nil {
 			logDebug("[keyboard] send-keys error: %v\n", err)
 		}
 	} else if msg.Type == "special-key" && msg.Key != "" {
@@ -1221,14 +1356,140 @@ func handleKeyboardInput(payload []byte, expectedPinHash, tmuxSession, paneId st
 			"C-z": true, "C-a": true, "C-e": true, "C-l": true, "Space": true,
 		}
 		if allowed[msg.Key] {
+			unlock := lockTmuxTarget(tmuxTarget)
 			cmd := exec.Command("tmux", "send-keys", "-t", tmuxTarget, msg.Key)
-			if err := cmd.Run(); err != nil {
+			err := cmd.Run()
+			unlock()
+			if err != nil {
 				logDebug("[keyboard] send-keys error: %v\n", err)
 			}
 		}
 	}
 
 	return true
+}
+
+// ConnectChatChannel opens the outbound Chat Channel for a chat-session:v1 Job (ALP spec
+// external/alp-spec/2026-03-30-draft/spec/13-chat.md, Kind A) and retries on disconnection —
+// mirrors ConnectBroadcast's retry-loop shape. This is the Operator half of the contract:
+// once the Runner has claimed a chat-kind Station Job and spawned vibecast, vibecast dials
+// back out to the Server, scoped by jobId, and services chat.message/chat.end frames for the
+// life of the session. It is distinct from both the per-pane terminal-broadcast socket
+// (ConnectBroadcast) and the unrelated live-viewer chat feature (ConnectChat/"/api/lives/chat/ws").
+func ConnectChatChannel(jobID, sessionID, paneId string, status *types.SharedStatus) {
+	for attempt := 0; attempt < 120; attempt++ {
+		if attempt > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		status.Mu.Lock()
+		host := status.ServerHost
+		status.Mu.Unlock()
+		if host == "" {
+			host = util.GetServerHost()
+		}
+		if connectChatChannelOnce(jobID, sessionID, paneId, host, status) {
+			// chat.end observed (either side) — session concluded normally, don't reconnect.
+			// The Job still concludes via complete_station/stop_broadcast (or the stop-hook
+			// fallback) exactly as the spec requires, independent of this channel closing.
+			logDebug("[chat-channel] session ended for job %s, not reconnecting\n", jobID)
+			return
+		}
+	}
+}
+
+// connectChatChannelOnce dials the Chat Channel once and services it until it closes.
+// Returns true if the session ended cleanly (a chat.end frame was received) so the retry
+// loop in ConnectChatChannel stops reconnecting; returns false on any other disconnect
+// (network drop, read/dial error) so the caller keeps retrying for the Job's lifetime.
+func connectChatChannelOnce(jobID, sessionID, paneId, serverHost string, status *types.SharedStatus) bool {
+	chatPath := "/api/lives/chat/channel/ws?jobId=" + jobID
+	if token, _, err := auth.GetValidToken(); err == nil && token != "" {
+		chatPath += "&token=" + token
+	}
+	conn, reader, err := ws.ConnectWithProtocol(serverHost, chatPath, "")
+	if err != nil {
+		logDebug("[chat-channel] connect error: %v\n", err)
+		return false
+	}
+	defer conn.Close()
+
+	status.Mu.Lock()
+	status.ChatChannelConn = conn
+	status.ChatJobID = jobID
+	status.Mu.Unlock()
+	defer func() {
+		status.Mu.Lock()
+		if status.ChatChannelConn == conn {
+			status.ChatChannelConn = nil
+		}
+		status.Mu.Unlock()
+	}()
+
+	logDebug("[chat-channel] connected for job %s (session=%s pane=%s)\n", jobID, sessionID, paneId)
+
+	// Extract the tmux socket path from $TMUX, same as connectBroadcastOnce, so exec'd
+	// "tmux" subcommands work when vibecast runs on a non-default socket.
+	tmuxSocket := ""
+	if tmuxEnv := os.Getenv("TMUX"); tmuxEnv != "" {
+		if idx := strings.Index(tmuxEnv, ","); idx > 0 {
+			tmuxSocket = tmuxEnv[:idx]
+		}
+	}
+	tmuxCmd := func(args ...string) *exec.Cmd {
+		if tmuxSocket != "" {
+			return exec.Command("tmux", append([]string{"-S", tmuxSocket}, args...)...)
+		}
+		return exec.Command("tmux", args...)
+	}
+	target := "vibecast-" + sessionID + ":" + paneId + ".0"
+
+	for {
+		opcode, payload, err := ws.ReadFrame(reader)
+		if err != nil {
+			logDebug("[chat-channel] read error: %v\n", err)
+			return false
+		}
+		switch opcode {
+		case 8:
+			logDebug("[chat-channel] server sent close frame\n")
+			return false
+		case 9:
+			ws.SendPong(conn, payload)
+		case 10:
+			// no-op
+		case 1:
+			var msg types.ChatChannelMsg
+			if err := json.Unmarshal(payload, &msg); err != nil {
+				logDebug("[chat-channel] unparseable frame: %v\n", err)
+				continue
+			}
+			switch msg.Type {
+			case "chat.message":
+				// Deliver the user's turn into the running Agent session via the exact same
+				// literal tmux send-keys primitive used for free-text answer injection above
+				// (the "tool"/free_text handler's tmuxSend(ctx, parent, target, "-l", "--", answer)
+				// + Enter) — no second injection mechanism.
+				// Hold the same pane-target lock the jobMode answer-injection goroutine and the
+				// onboarding/keyboard-relay send-keys sites use, so this text+Enter sequence
+				// can't interleave with a permission answer (or vice versa) mid-injection.
+				func() {
+					defer lockTmuxTarget(target)()
+					tmuxCmd("send-keys", "-t", target, "-l", "--", msg.Text).Run()
+					time.Sleep(100 * time.Millisecond)
+					tmuxCmd("send-keys", "-t", target, "Enter").Run()
+				}()
+				logDebug("[chat-channel] injected chat.message (len=%d) jobId=%s\n", len(msg.Text), jobID)
+			case "chat.end":
+				// Either side may end the session. complete_station (or the stop-hook
+				// fallback in internal/hooks/hooks.go handleHookStop) still fires
+				// independently of this channel, so the Job always concludes normally.
+				logDebug("[chat-channel] chat.end received (reason=%q) jobId=%s\n", msg.Reason, jobID)
+				return true
+			default:
+				logDebug("[chat-channel] unrecognized frame type %q jobId=%s\n", msg.Type, jobID)
+			}
+		}
+	}
 }
 
 // ConnectChat connects to the chat WebSocket and sends received messages to the TUI program.
