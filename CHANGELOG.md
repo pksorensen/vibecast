@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.1.31](https://github.com/pksorensen/vibecast/compare/v0.1.30...v0.1.31) (2026-07-15)
+
+
+### Features
+
+* **agent:** codex adapter increment 1 — launch surface + config seed (C01 green) ([62b73ca](https://github.com/pksorensen/vibecast/commit/62b73ca348d266808174a8e9f9487fa5e199d4da))
+* **agent:** extract internal/agent adapter seam — byte-identical Claude launch ([4184b41](https://github.com/pksorensen/vibecast/commit/4184b4185cbebcd49d159905a3dca682bd147ff2))
+* **agent:** production config-seed seam; codex self-provisions CODEX_HOME ([c03304a](https://github.com/pksorensen/vibecast/commit/c03304aee7f8ed69453ad5bce7198c75926cb54c))
+* **codex:** C02 session identity via discover-identity write-back ([171bd24](https://github.com/pksorensen/vibecast/commit/171bd24fe2851cf42716956f6960b5b731ff629a))
+* **codex:** C05 green — run codex with -s danger-full-access (guard-hook floor) ([8c24ac6](https://github.com/pksorensen/vibecast/commit/8c24ac6ea63575599bc956636ef78cf1028179ab))
+* **codex:** C07 green — job-mode developer_instructions mandate drives stop_broadcast ([2cb3eb0](https://github.com/pksorensen/vibecast/commit/2cb3eb074fa2a0498433907f9d7f9e4307b346b2))
+* **conformance:** C09 resume-relaunch green — Runner VIBECAST_RESUME_SESSION_ID contract ([39c7fa4](https://github.com/pksorensen/vibecast/commit/39c7fa4f1ebec0272ff8bf4ec2d803a487ce6629))
+* **conformance:** codex C08/C09/C11 green — guard deny, resume, typed-prompt seams ([3d6b216](https://github.com/pksorensen/vibecast/commit/3d6b21666a1177b0d84164229d8652414c89d94a))
+* **hooks:** record guard denies to per-stream ledger + C08 conformance scenario ([a36f27d](https://github.com/pksorensen/vibecast/commit/a36f27def2dfd2239926a8a14bdc6b730ed0c00e))
+* **pi:** C03/C04/C06 green — Foundry model wiring + filter-safe prompts + Stop fallbacks ([3b801bd](https://github.com/pksorensen/vibecast/commit/3b801bdbbb0b8f3d0882fc016a5a07b53d6b7e68))
+* **pi:** C05/C07/C08/C09/C11 green — pi adapter is 11/11 conformance-complete ([92342d2](https://github.com/pksorensen/vibecast/commit/92342d245af548bcf19e0081b3432f34e1e7e08b))
+* **pi:** hook-bridge extension + config-seed — C01 green ([72f5948](https://github.com/pksorensen/vibecast/commit/72f594882323d31835782204dc037f2f1f8dd92c))
+* **pi:** pi adapter launch/resume command builder + golden tests ([826a89d](https://github.com/pksorensen/vibecast/commit/826a89d5e7f6bb7e521b9351e4beaa14b911d68e))
+* **vibecast:** codex C04 — station system-prompt append + rollout→claude transcript normalization ([ce03f45](https://github.com/pksorensen/vibecast/commit/ce03f4576f3f5a3ac8aa86648323198947d41d63))
+
+
+### Bug Fixes
+
+* **agent:** seed agent config on interactive --resume respawn too ([fc8d742](https://github.com/pksorensen/vibecast/commit/fc8d742a3f3b4cae76e30831d1c2fc6898bea55d))
+* **codex:** disable plugins feature — deterministic launch, no marketplace clone ([ac9fd3c](https://github.com/pksorensen/vibecast/commit/ac9fd3cb35f55195666fb9bbbd62286799fea5c0))
+* **hooks:** wait for late transcript flush so turn-end reply isn't dropped ([6883668](https://github.com/pksorensen/vibecast/commit/6883668f86fe27be9b4e7b1e1e291441fcf01bfe))
+* **vibecast:** make graceful stop idempotent so session-event `end` is never dropped ([5aa5ec1](https://github.com/pksorensen/vibecast/commit/5aa5ec16f2be30802ec86d91ca9602365636912f))
+
 ## [0.1.30](https://github.com/pksorensen/vibecast/compare/v0.1.29...v0.1.30) (2026-06-11)
 
 
