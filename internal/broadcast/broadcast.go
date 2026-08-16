@@ -304,6 +304,7 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 	bypassAnsweredSnap := false
 	tourAnsweredSnap := false
 	apiKeyGateAnsweredSnap := false
+	notLoggedInAnsweredSnap := false
 	// Track posted alp_pane question so we only post once per session-size menu appearance.
 	postedPaneQuestionId := ""
 	// Track posted onboarding_external question so we only surface the OAuth gate once per URL.
@@ -601,6 +602,33 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 					}()
 					logDebug("[broadcast] auto-answered onboarding tour gate (option 2 — skip)\n")
 					tourAnsweredSnap = true
+				}
+
+				// Credential-less REPL — the pane is alive and answering, but every turn
+				// comes back as
+				//
+				//   ⎿  Not logged in · Please run /login
+				//
+				// This is NOT one of Claude's onboarding screens: it happens when the
+				// mounted CLAUDE_CONFIG_DIR holds no usable credential (empty volume, or a
+				// copied .credentials.json whose refresh token was already rotated). Claude
+				// never enters its login flow on its own here, so none of the detectors
+				// below ever see a screen — the job just idles at the prompt until the
+				// runner's idle timeout, historically reported as completed/success.
+				//
+				// Typing /login ourselves puts Claude into the flow, which hands off to the
+				// login-method picker and then the OAuth-URL gate — both already handled,
+				// so the sign-in URL reaches the dashboard and the runner console.
+				if !notLoggedInAnsweredSnap && strings.Contains(plain, "Not logged in") &&
+					strings.Contains(plain, "/login") {
+					func() {
+						defer lockTmuxTarget(snapTmuxTarget + ".0")()
+						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "/login").Run()
+						time.Sleep(150 * time.Millisecond)
+						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+					}()
+					logDebug("[broadcast] pane reported \"Not logged in\" — sent /login to start the sign-in flow\n")
+					notLoggedInAnsweredSnap = true
 				}
 
 				// Helper for posting an alp_pane vote question. Server stores it on the task
