@@ -305,6 +305,34 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 	tourAnsweredSnap := false
 	apiKeyGateAnsweredSnap := false
 	notLoggedInAnsweredSnap := false
+	// The job's prompt is a positional argument on the claude command line, so the process that
+	// ran before a login already consumed it — and failed it, having no credential. Signing in
+	// otherwise leaves a perfectly authenticated claude sitting at an empty prompt with the task
+	// gone, which then idles out. Respawning re-reads VIBECAST_INITIAL_PROMPT_FILE, so the agent
+	// starts over on the real task. This is the auth-recovery flow SharedStatus.RestartClaude was
+	// wired for. Fired from whichever post-login screen shows up first, at most once.
+	postLoginRestartDone := false
+	schedulePostLoginRestart := func(trigger string) {
+		if postLoginRestartDone {
+			return
+		}
+		postLoginRestartDone = true
+		restart := status.RestartClaude
+		if restart == nil {
+			logDebug("[broadcast] post-login restart skipped (%s): no restart hook wired\n", trigger)
+			return
+		}
+		go func() {
+			// Let claude finish writing the credential and settle before the pane is
+			// respawned under it.
+			time.Sleep(5 * time.Second)
+			if err := restart("vibecast-"+sessionID, false, "", paneId); err != nil {
+				logDebug("[broadcast] post-login restart failed (%s): %v\n", trigger, err)
+				return
+			}
+			logDebug("[broadcast] respawned the agent pane after login (%s) so the initial prompt runs\n", trigger)
+		}()
+	}
 	// Track posted alp_pane question so we only post once per session-size menu appearance.
 	postedPaneQuestionId := ""
 	// Track posted onboarding_external question so we only surface the OAuth gate once per URL.
@@ -521,6 +549,7 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 					}()
 					logDebug("[broadcast] auto-answered post-OAuth login-successful screen\n")
 					loginSuccessAnsweredSnap = true
+					schedulePostLoginRestart("login-successful screen")
 				}
 				// Security notes screen — appears after login, displays "Claude can make mistakes"
 				// + "prompt injection risks" + "Press Enter to continue". No real choice.
@@ -532,6 +561,14 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 					}()
 					logDebug("[broadcast] auto-answered security-notes screen\n")
 					securityNotesAnsweredSnap = true
+					// Fallback trigger for the respawn above, for a claude that goes straight
+					// from the browser to this screen without the "Login successful" one. Only
+					// when we know this session actually went through a login — on a job that
+					// started already authenticated this screen is just first-run boilerplate,
+					// and respawning then would restart an agent that is already working.
+					if notLoggedInAnsweredSnap || loginAnsweredSnap || postedOnboardingQuestionId != "" {
+						schedulePostLoginRestart("security-notes screen")
+					}
 				}
 				// Bypass-permissions confirmation. Default highlight is "1. No, exit" so a
 				// blind Enter would kill Claude. Job mode runs Claude with --dangerously-skip-permissions
