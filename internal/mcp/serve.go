@@ -515,29 +515,19 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 		if os.Getenv("AGENTICS_AUTO_GIT") == "1" {
 			cwd, _ := os.Getwd()
 
-			// Refresh the credentials embedded in origin before pushing -- the token
-			// baked in at clone time can expire/rotate over a long-running session.
-			// This must NOT touch origin's host/scheme/path: origin is authored via
-			// cloneUrlFor() at job-build time from this deployment's own AGENT_GIT_URL,
-			// so it already points at the current pks-agent-git instance (see
-			// agent-definition.ts's "no stale-port reconstruction needed" comment).
-			// A prior version of this block rewrote host+scheme to AGENTICS_BASE_URL --
-			// the *website's* base URL, a completely different service from the git
-			// server -- which broke every push with "repository not found" once
-			// pks-agent-git became a separate deployment from the website.
-			token := os.Getenv("AGENTICS_REPO_TOKEN")
-			if token == "" {
-				token = os.Getenv("AGENTICS_TOKEN")
-			}
-			if token != "" {
-				if rawOrigin, err := execCommand("git", "-C", cwd, "remote", "get-url", "origin"); err == nil {
-					rawOrigin = strings.TrimSpace(rawOrigin)
-					if parsedOrigin, err := url.Parse(rawOrigin); err == nil {
-						parsedOrigin.User = url.UserPassword("x-access-token", token)
-						newOrigin := parsedOrigin.String()
-						exec.Command("git", "-C", cwd, "remote", "set-url", "origin", newOrigin).Run()
-						fmt.Fprintf(os.Stderr, "auto-git: refreshed origin credentials\n")
-					}
+			credentialPlan := autoGitCredentialPlan{}
+			if rawOrigin, err := execCommand("git", "-C", cwd, "remote", "get-url", "origin"); err == nil {
+				rawOrigin = strings.TrimSpace(rawOrigin)
+				credentialPlan = planAutoGitCredentials(
+					rawOrigin,
+					os.Getenv("AGENTICS_COMMIT_BACK_URL"),
+					os.Getenv("AGENTICS_COMMIT_BACK_CREDENTIAL_KIND"),
+					os.Getenv("AGENTICS_COMMIT_BACK_TOKEN"),
+					os.Getenv("AGENTICS_REPO_TOKEN"),
+				)
+				if credentialPlan.remoteURL != "" && credentialPlan.remoteURL != rawOrigin {
+					exec.Command("git", "-C", cwd, "remote", "set-url", "origin", credentialPlan.remoteURL).Run()
+					fmt.Fprintf(os.Stderr, "auto-git: configured explicit commit-back credentials\n")
 				}
 			}
 
@@ -547,14 +537,18 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 					branch = b
 				}
 			}
-			// Disable credential helpers so the token embedded in the remote URL
-			// is used directly — GIT_ASKPASS (VS Code) or other helpers must not override it.
-			pushCmd := exec.Command("git", "-c", "credential.helper=", "-C", cwd, "push", "origin", branch)
-			pushEnv := make([]string, 0, len(os.Environ()))
+			pushArgs := []string{"-C", cwd, "push", "origin", branch}
+			if credentialPlan.isolateCredentialHelpers {
+				pushArgs = append([]string{"-c", "credential.helper="}, pushArgs...)
+			}
+			pushCmd := exec.Command("git", pushArgs...)
+			pushEnv := make([]string, 0, len(os.Environ())+1)
 			for _, e := range os.Environ() {
-				if strings.HasPrefix(e, "GIT_ASKPASS=") ||
-					strings.HasPrefix(e, "VSCODE_GIT_ASKPASS") ||
-					strings.HasPrefix(e, "GIT_TERMINAL_PROMPT=") {
+				if strings.HasPrefix(e, "GIT_TERMINAL_PROMPT=") {
+					continue
+				}
+				if credentialPlan.isolateCredentialHelpers &&
+					(strings.HasPrefix(e, "GIT_ASKPASS=") || strings.HasPrefix(e, "VSCODE_GIT_ASKPASS")) {
 					continue
 				}
 				pushEnv = append(pushEnv, e)
