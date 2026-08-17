@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,9 +195,16 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 	ws.SendText(ttydConn, initMsg)
 
 	// 3. Connect to cloud server broadcast endpoint
-	broadcastPath := "/api/lives/broadcast/ws?sessionId=" + sessionID + "&broadcastId=" + broadcastID + "&paneId=" + paneId
-	if token, _, err := auth.GetValidToken(); err == nil && token != "" {
-		broadcastPath += "&token=" + token
+	broadcastPath := "/api/lives/broadcast/ws?sessionId=" + url.QueryEscape(sessionID) +
+		"&broadcastId=" + url.QueryEscape(broadcastID) + "&paneId=" + url.QueryEscape(paneId)
+	if owner := os.Getenv("AGENTICS_OWNER"); owner != "" {
+		broadcastPath += "&owner=" + url.QueryEscape(owner)
+	}
+	if project := os.Getenv("AGENTICS_PROJECT_NAME"); project != "" {
+		broadcastPath += "&project=" + url.QueryEscape(project)
+	}
+	if token, _, err := auth.GetStreamingToken(); err == nil && token != "" {
+		broadcastPath += "&token=" + url.QueryEscape(token)
 	}
 	serverConn, serverReader, err := ws.ConnectWithProtocol(serverHost, broadcastPath, "")
 	if err != nil {
@@ -762,16 +770,16 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 
 				question := "Sign in to Claude Code to continue"
 				payload, _ := json.Marshal(map[string]interface{}{
-					"sessionId":      sessionID,
-					"type":           "metadata",
-					"subtype":        "onboarding_external",
-					"questionId":     questionId,
-					"question":       question,
-					"actionUrl":      oauthURL,
-					"actionLabel":    "Open sign-in URL",
-					"answerLabel":    "Paste the code from the browser",
-					"provider":       "claude-subscription",
-					"timestamp":      time.Now().Unix(),
+					"sessionId":   sessionID,
+					"type":        "metadata",
+					"subtype":     "onboarding_external",
+					"questionId":  questionId,
+					"question":    question,
+					"actionUrl":   oauthURL,
+					"actionLabel": "Open sign-in URL",
+					"answerLabel": "Paste the code from the browser",
+					"provider":    "claude-subscription",
+					"timestamp":   time.Now().Unix(),
 				})
 				metaURL := fmt.Sprintf("%s://%s/api/lives/metadata", snapSchemeBase, serverHost)
 				if resp, err := http.Post(metaURL, "application/json", bytes.NewReader(payload)); err == nil {
@@ -1195,7 +1203,9 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 							attribute.String("question.id", qID),
 							attribute.String("question.type", r.QuestionType),
 							attribute.String("answer.preview", func() string {
-								if len(answer) > 80 { return answer[:80] }
+								if len(answer) > 80 {
+									return answer[:80]
+								}
 								return answer
 							}()),
 						))
@@ -1467,9 +1477,15 @@ func ConnectChatChannel(jobID, sessionID, paneId string, status *types.SharedSta
 // loop in ConnectChatChannel stops reconnecting; returns false on any other disconnect
 // (network drop, read/dial error) so the caller keeps retrying for the Job's lifetime.
 func connectChatChannelOnce(jobID, sessionID, paneId, serverHost string, status *types.SharedStatus) bool {
-	chatPath := "/api/lives/chat/channel/ws?jobId=" + jobID
-	if token, _, err := auth.GetValidToken(); err == nil && token != "" {
-		chatPath += "&token=" + token
+	chatPath := "/api/lives/chat/channel/ws?jobId=" + url.QueryEscape(jobID)
+	if owner := os.Getenv("AGENTICS_OWNER"); owner != "" {
+		chatPath += "&owner=" + url.QueryEscape(owner)
+	}
+	if project := os.Getenv("AGENTICS_PROJECT_NAME"); project != "" {
+		chatPath += "&project=" + url.QueryEscape(project)
+	}
+	if token, _, err := auth.GetStreamingToken(); err == nil && token != "" {
+		chatPath += "&token=" + url.QueryEscape(token)
 	}
 	conn, reader, err := ws.ConnectWithProtocol(serverHost, chatPath, "")
 	if err != nil {

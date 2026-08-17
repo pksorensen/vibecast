@@ -880,7 +880,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 
 		if authConfig, err := auth.FetchAuthConfig(serverHost); err == nil {
 			if authConfig.AuthRequired {
-				if _, _, authErr := auth.GetValidToken(); authErr != nil {
+				if _, _, authErr := auth.GetStreamingToken(); authErr != nil {
 					return streamError(span, fmt.Errorf("authentication required — run 'vibecast login' first"))
 				}
 			}
@@ -906,7 +906,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 				"event":       "start",
 				"attributes":  status.Attrs,
 			}
-			if token, claims, err := auth.GetValidToken(); err == nil && token != "" {
+			if token, claims, err := auth.GetStreamingToken(); err == nil && token != "" && claims != nil {
 				eventBody["user"] = claims
 			}
 			bodyBytes, _ := json.Marshal(eventBody)
@@ -1067,7 +1067,7 @@ func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 
 		if authConfig, err := auth.FetchAuthConfig(serverHost); err == nil {
 			if authConfig.AuthRequired {
-				if _, _, authErr := auth.GetValidToken(); authErr != nil {
+				if _, _, authErr := auth.GetStreamingToken(); authErr != nil {
 					return streamError(span, fmt.Errorf("authentication required — run 'vibecast login' first"))
 				}
 			}
@@ -1092,7 +1092,7 @@ func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 				"sessionId": sessionID,
 				"event":     "start",
 			}
-			if token, claims, err := auth.GetValidToken(); err == nil && token != "" {
+			if token, claims, err := auth.GetStreamingToken(); err == nil && token != "" && claims != nil {
 				eventBody["user"] = claims
 			}
 			bodyBytes, _ := json.Marshal(eventBody)

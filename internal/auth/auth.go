@@ -100,6 +100,26 @@ func GetValidToken() (string, *types.AuthData, error) {
 	return auth.AccessToken, auth, nil
 }
 
+// GetStreamingToken returns the credential used for Agentics live-stream
+// connections. Interactive vibecast sessions use the saved Keycloak token.
+// Runner jobs are already authenticated with a project-scoped Agentics runner
+// token, so they must not require a second, human login inside every ephemeral
+// job home.
+func GetStreamingToken() (string, *types.AuthData, error) {
+	token, claims, err := GetValidToken()
+	if err == nil && token != "" {
+		return token, claims, nil
+	}
+
+	if os.Getenv("AGENTICS_JOB_MODE") == "1" {
+		if runnerToken := strings.TrimSpace(os.Getenv("AGENTICS_TOKEN")); runnerToken != "" {
+			return runnerToken, nil, nil
+		}
+	}
+
+	return "", nil, err
+}
+
 // DecodeJWTUser extracts user info from a JWT access token.
 func DecodeJWTUser(token string) (*types.AuthUserInfo, error) {
 	parts := strings.Split(token, ".")
@@ -120,20 +140,20 @@ func DecodeJWTUser(token string) (*types.AuthUserInfo, error) {
 	}
 
 	var claims struct {
-		Sub              string `json:"sub"`
+		Sub               string `json:"sub"`
 		PreferredUsername string `json:"preferred_username"`
-		Email            string `json:"email"`
-		Picture          string `json:"picture"`
+		Email             string `json:"email"`
+		Picture           string `json:"picture"`
 	}
 	if err := json.Unmarshal(decoded, &claims); err != nil {
 		return nil, fmt.Errorf("failed to parse JWT claims: %w", err)
 	}
 
 	return &types.AuthUserInfo{
-		Sub:              claims.Sub,
+		Sub:               claims.Sub,
 		PreferredUsername: claims.PreferredUsername,
-		Email:            claims.Email,
-		Picture:          claims.Picture,
+		Email:             claims.Email,
+		Picture:           claims.Picture,
 	}, nil
 }
 
