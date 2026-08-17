@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.32](https://github.com/pksorensen/vibecast/compare/v0.1.31...v0.1.32) (2026-08-17)
+
+
+### Bug Fixes
+
+* **agentics:** authenticate runner live streams ([31bb401](https://github.com/pksorensen/vibecast/commit/31bb4016d7c0034b4eec75f47b2c114273553349))
+* **auto-git:** preserve external repository credentials ([7c36029](https://github.com/pksorensen/vibecast/commit/7c3602995bce1590ff9b45a46ae8fc17df733d19))
+* **broadcast:** re-run the job prompt after an onboarding login ([98c0b04](https://github.com/pksorensen/vibecast/commit/98c0b04148f88ea68f5be11dff72ee4e9e5d6aac))
+* **broadcast:** type /login when the pane reports "Not logged in" ([6407ef0](https://github.com/pksorensen/vibecast/commit/6407ef04be994e01ed469ae3d681b195f110beec))
+
 ## [0.1.31](https://github.com/pksorensen/vibecast/compare/v0.1.30...v0.1.31) (2026-07-15)
 
 
