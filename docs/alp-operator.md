@@ -81,12 +81,17 @@ something the agent was already going to be woken for.
 
 So the Stop hook reads `background_tasks` and `session_crons` out of its own payload:
 
-- **Work still in flight** → the stop is allowed. vibecast posts a `background_wait`
-  event naming what is being waited on, and the Server holds the session `isActive`
-  for a bounded window so the Runner does not read the deliberate quiet as
-  "agent done". The first real activity after the wake clears the hold; a station
-  that parks again simply takes a fresh one. The Runner's own max timeout is still
-  the backstop.
+- **Work still in flight** → vibecast posts a `background_wait` event naming what is
+  being waited on, and the stop is allowed *if the Server answers with
+  `backgroundHoldUntil`*. That field is a capability handshake, not decoration: it
+  says the Server is holding the session `isActive` for a bounded window so the
+  Runner does not read the deliberate quiet as "agent done". A Server that predates
+  this feature accepts the event and does nothing, and parking against it would hand
+  the Runner a silent session to conclude at idle timeout — strictly worse than the
+  forced continuation it replaces. So no confirmation means the old behavior, and
+  Operator and Server can be deployed in either order. The first real activity after
+  the wake clears the hold; a station that parks again simply takes a fresh one. The
+  Runner's own max timeout is still the backstop.
 - **`background_tasks` present and empty** → this is the true final stop, and every
   gate runs as before: auto-git, and the `stop_broadcast` requirement.
 - **Key absent entirely** (codex, pi, older Claude Code) → unchanged legacy path.

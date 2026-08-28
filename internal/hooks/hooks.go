@@ -410,6 +410,13 @@ func extractUsageFromTranscript(lines []map[string]interface{}) map[string]inter
 
 // HookPostMetadata posts metadata to the server.
 func HookPostMetadata(sf *types.SessionFile, payload []byte) {
+	hookPostMetadataResponse(sf, payload)
+}
+
+// hookPostMetadataResponse posts a metadata event and returns the Server's response
+// body on 200, or nil on any failure. Callers that only fire-and-forget use
+// HookPostMetadata; the background-wait handshake needs to read the reply.
+func hookPostMetadataResponse(sf *types.SessionFile, payload []byte) []byte {
 	_, span := telemetry.Tracer().Start(context.Background(), "vibecast.hook.metadata_post",
 		trace.WithAttributes(
 			attribute.String("session.id", sf.SessionID),
@@ -430,7 +437,7 @@ func HookPostMetadata(sf *types.SessionFile, payload []byte) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "request creation failed")
 		util.DebugLog("hookPostMetadata: request creation error: %v", err)
-		return
+		return nil
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if token, _, authErr := auth.GetValidToken(); authErr == nil && token != "" {
@@ -441,17 +448,18 @@ func HookPostMetadata(sf *types.SessionFile, payload []byte) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "request failed")
 		util.DebugLog("hookPostMetadata: error: %v", err)
-		return
+		return nil
 	}
 	defer resp.Body.Close()
 	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
 		span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", resp.StatusCode))
 		util.DebugLog("hookPostMetadata: non-200 status=%d body=%s", resp.StatusCode, string(body))
-	} else {
-		util.DebugLog("hookPostMetadata: success (200)")
+		return nil
 	}
+	util.DebugLog("hookPostMetadata: success (200)")
+	return body
 }
 
 func handleHookPrompt() {
@@ -1121,7 +1129,7 @@ func backgroundWaitHoldMinutes() int {
 // postBackgroundWait tells the server the session parked rather than finished, so
 // the activity endpoint keeps reporting it active and the runner does not conclude
 // the job at idle timeout.
-func postBackgroundWait(sf *types.SessionFile, tasks []backgroundTask, crons []map[string]interface{}) {
+func postBackgroundWait(sf *types.SessionFile, tasks []backgroundTask, crons []map[string]interface{}) bool {
 	items := make([]map[string]interface{}, 0, len(tasks)+len(crons))
 	for _, t := range tasks {
 		items = append(items, map[string]interface{}{
@@ -1154,7 +1162,15 @@ func postBackgroundWait(sf *types.SessionFile, tasks []backgroundTask, crons []m
 		"timestamp":   time.Now().Unix(),
 	}
 	payload, _ := json.Marshal(p)
-	HookPostMetadata(sf, payload)
+
+	var ack struct {
+		BackgroundHoldUntil int64 `json:"backgroundHoldUntil"`
+	}
+	body := hookPostMetadataResponse(sf, payload)
+	if body == nil || json.Unmarshal(body, &ack) != nil || ack.BackgroundHoldUntil <= 0 {
+		return false
+	}
+	return true
 }
 
 func handleHookStop() {
@@ -1212,12 +1228,19 @@ func handleHookStop() {
 	// for the true final stop.
 	waitingTasks, waitingCrons, bgPresent := parseStopBackgroundWork(stdinData)
 	if bgPresent && (len(waitingTasks) > 0 || len(waitingCrons) > 0) {
-		util.DebugLog("[stop] parking: %d background task(s), %d cron(s) still in flight", len(waitingTasks), len(waitingCrons))
-		postBackgroundWait(sf, waitingTasks, waitingCrons)
-		// A park is not a refusal to call stop_broadcast, so it must not spend the
-		// block budget that would otherwise auto-conclude the job as incomplete.
-		resetStopBlockCount(sf.SessionID)
-		os.Exit(0)
+		util.DebugLog("[stop] background work in flight: %d task(s), %d cron(s)", len(waitingTasks), len(waitingCrons))
+		// Park only if the Server confirms it is holding the session active. A Server
+		// that predates this feature accepts the event and does nothing, and parking
+		// against it would hand the Runner a silent session to conclude at idle
+		// timeout — strictly worse than the forced continuation it replaces. No
+		// confirmation therefore means fall through to the pre-existing behavior.
+		if postBackgroundWait(sf, waitingTasks, waitingCrons) {
+			// A park is not a refusal to call stop_broadcast, so it must not spend the
+			// block budget that would otherwise auto-conclude the job as incomplete.
+			resetStopBlockCount(sf.SessionID)
+			os.Exit(0)
+		}
+		util.DebugLog("[stop] server did not confirm a hold — falling through to stop enforcement")
 	}
 
 	// Auto-git: block stop if uncommitted changes exist
