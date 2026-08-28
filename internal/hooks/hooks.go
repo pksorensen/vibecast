@@ -482,6 +482,9 @@ func handleHookPrompt() {
 
 	payload, _ := json.Marshal(p)
 	HookPostMetadata(sf, payload)
+
+	// A new prompt starts a fresh stop cycle; the previous cycle's blocks are spent.
+	resetStopBlockCount(sf.SessionID)
 	os.Exit(0)
 }
 
@@ -1047,6 +1050,113 @@ func waitForFinalAssistant(streamID, transcriptPath string, timeout time.Duratio
 	}
 }
 
+// backgroundTask mirrors one entry of the Stop hook payload's background_tasks
+// array: the shells, subagents, monitors and workflows Claude Code has in flight
+// at the moment the turn ends. The command field is deliberately not modelled —
+// it can carry secrets and never leaves the hook.
+type backgroundTask struct {
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	Description string `json:"description"`
+}
+
+// backgroundTaskFinished reports whether a task has reached a terminal state and
+// therefore will not wake the session. Unknown statuses count as in flight: a park
+// that turns out to be unnecessary costs one idle hold, while a missed park costs
+// the job.
+func backgroundTaskFinished(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "complete", "failed", "error", "cancelled", "canceled", "killed":
+		return true
+	}
+	return false
+}
+
+// parseStopBackgroundWork extracts the work that will re-invoke this session after
+// the turn ends. The third return distinguishes "the payload says there is nothing
+// left" from "the payload does not carry this information at all" — codex, pi and
+// pre-2.1 Claude Code send no background_tasks key, and those agents must keep the
+// legacy pane-scrape path rather than be treated as finished.
+func parseStopBackgroundWork(stdinData []byte) (tasks []backgroundTask, crons []map[string]interface{}, present bool) {
+	var in struct {
+		BackgroundTasks *[]backgroundTask         `json:"background_tasks"`
+		SessionCrons    *[]map[string]interface{} `json:"session_crons"`
+	}
+	if json.Unmarshal(stdinData, &in) != nil {
+		return nil, nil, false
+	}
+	if in.BackgroundTasks == nil && in.SessionCrons == nil {
+		return nil, nil, false
+	}
+	if in.BackgroundTasks != nil {
+		for _, t := range *in.BackgroundTasks {
+			if !backgroundTaskFinished(t.Status) {
+				tasks = append(tasks, t)
+			}
+		}
+	}
+	if in.SessionCrons != nil {
+		crons = *in.SessionCrons
+	}
+	return tasks, crons, true
+}
+
+// backgroundWaitHoldMinutes is how long the server keeps the session marked active
+// while it is parked. It is a bound, not a promise: the runner's own max timeout
+// remains the backstop, and any real activity after the wake clears the hold.
+func backgroundWaitHoldMinutes() int {
+	const def = 30
+	raw := strings.TrimSpace(os.Getenv("AGENTICS_BACKGROUND_WAIT_HOLD_MINUTES"))
+	if raw == "" {
+		return def
+	}
+	var n int
+	if _, err := fmt.Sscanf(raw, "%d", &n); err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
+// postBackgroundWait tells the server the session parked rather than finished, so
+// the activity endpoint keeps reporting it active and the runner does not conclude
+// the job at idle timeout.
+func postBackgroundWait(sf *types.SessionFile, tasks []backgroundTask, crons []map[string]interface{}) {
+	items := make([]map[string]interface{}, 0, len(tasks)+len(crons))
+	for _, t := range tasks {
+		items = append(items, map[string]interface{}{
+			"id":          t.ID,
+			"kind":        t.Type,
+			"status":      t.Status,
+			"description": t.Description,
+		})
+	}
+	for _, c := range crons {
+		item := map[string]interface{}{"kind": "cron"}
+		for _, key := range []string{"id", "description", "prompt", "name"} {
+			if v, ok := c[key].(string); ok && v != "" {
+				if key == "id" {
+					item["id"] = v
+				} else if _, taken := item["description"]; !taken {
+					item["description"] = v
+				}
+			}
+		}
+		items = append(items, item)
+	}
+
+	p := map[string]interface{}{
+		"sessionId":   sf.SessionID,
+		"type":        "metadata",
+		"subtype":     "background_wait",
+		"waitingOn":   items,
+		"holdMinutes": backgroundWaitHoldMinutes(),
+		"timestamp":   time.Now().Unix(),
+	}
+	payload, _ := json.Marshal(p)
+	HookPostMetadata(sf, payload)
+}
+
 func handleHookStop() {
 	stdinData, sf, cwd, transcriptPath, _ := hookReadStdinAndFindSession()
 
@@ -1091,6 +1201,25 @@ func handleHookStop() {
 		HookPostMetadata(sf, payload)
 	}
 
+	// Park instead of forcing continuation. Modern Claude Code ends a turn while
+	// background shells, subagents, monitors, workflows or a scheduled wake-up are
+	// still in flight, and re-invokes itself when that work completes (verified: the
+	// wake fires, and the Stop payload of the woken turn carries an empty
+	// background_tasks). Blocking here would spend a full round-trip per poll on
+	// something the agent is already going to be woken for. So allow the stop, tell
+	// the server the session is parked rather than finished, and leave every gate
+	// below — auto-git included, since mid-work changes are not ready to commit —
+	// for the true final stop.
+	waitingTasks, waitingCrons, bgPresent := parseStopBackgroundWork(stdinData)
+	if bgPresent && (len(waitingTasks) > 0 || len(waitingCrons) > 0) {
+		util.DebugLog("[stop] parking: %d background task(s), %d cron(s) still in flight", len(waitingTasks), len(waitingCrons))
+		postBackgroundWait(sf, waitingTasks, waitingCrons)
+		// A park is not a refusal to call stop_broadcast, so it must not spend the
+		// block budget that would otherwise auto-conclude the job as incomplete.
+		resetStopBlockCount(sf.SessionID)
+		os.Exit(0)
+	}
+
 	// Auto-git: block stop if uncommitted changes exist
 	if os.Getenv("AGENTICS_AUTO_GIT") == "1" {
 		out, err := exec.Command("git", "-C", cwd, "status", "--porcelain").Output()
@@ -1116,10 +1245,15 @@ func handleHookStop() {
 	// Only active when AGENTICS_JOB_MODE=1 (set by pks-cli job runner).
 	// Regular interactive users (npx vibecast) are unaffected.
 	if os.Getenv("AGENTICS_JOB_MODE") == "1" {
-		// Check if background agents are still running.
+		// Legacy fallback for agents whose Stop payload carries no background_tasks
+		// at all (codex, pi, pre-2.1 Claude Code): scrape the pane for the status-line
+		// agent counter. When the payload does report background work, the park above
+		// has already handled it and this pane scrape must not run — it would block a
+		// stop the payload just told us is genuine.
+		//
 		// Sleep 60s before blocking — the tmux pane won't update while the hook is
 		// blocking Claude, so we give agents time to finish between hook invocations.
-		if tmuxPane := os.Getenv("TMUX_PANE"); tmuxPane != "" {
+		if tmuxPane := os.Getenv("TMUX_PANE"); !bgPresent && tmuxPane != "" {
 			if out, err := exec.Command("tmux", "capture-pane", "-p", "-t", tmuxPane).Output(); err == nil {
 				if matched, _ := regexp.MatchString(`\d+ local agents`, string(out)); matched {
 					time.Sleep(60 * time.Second)
@@ -1464,6 +1598,17 @@ func readStopBlockCount(streamID string) int {
 	var n int
 	fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &n)
 	return n
+}
+
+// resetStopBlockCount clears the consecutive-block counter. The counter exists to
+// stop an endless "call stop_broadcast" loop, so it has to count consecutive
+// blocks: without a reset it is a lifetime budget of two, and the third legitimate
+// stop in a long session gets auto-concluded as incomplete mid-work.
+func resetStopBlockCount(streamID string) {
+	path := filepath.Join(transcriptCursorDir(streamID), "stop_blocks")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		util.DebugLog("[stop-enforce] could not reset block count: %v", err)
+	}
 }
 
 func writeStopBlockCount(streamID string, n int) {

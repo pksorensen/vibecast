@@ -61,12 +61,42 @@ Runner (pks-cli)
 | `CLAUDE_AUTO_UPDATE_DISABLED` | Opt out of the default update-to-latest run before the first spawn |
 | `CLAUDE_VERSION` | Pin every station in the line to an exact Claude version (overrides auto-update) |
 | `INITIAL_PROMPT` | The task description injected as the first user message |
+| `AGENTICS_BACKGROUND_WAIT_HOLD_MINUTES` | How long the Server keeps a *parked* session marked active (default 30) |
 
 > **Claude version is an operator concern, not line config.** Before the first
 > spawn of a session, vibecast runs `claude update` once (frozen for the whole
 > line so stations don't drift if a release lands mid-run). It is fail-open — a
 > failed update never blocks the broadcast. Set `CLAUDE_VERSION` to pin a known
 > build, or `CLAUDE_AUTO_UPDATE_DISABLED=1` to use whatever the image ships.
+
+## Parking: waiting is cheaper than being forced to continue
+
+The Stop hook was originally written to catch the end of a turn and push the agent
+onward, because an agent that stopped was an agent that had given up. That premise
+has expired. Claude Code now ends a turn on purpose while background shells,
+subagents, monitors, workflows or a scheduled wake-up are still in flight, and
+re-invokes itself the moment that work completes. Forcing a continuation there does
+not make the job finish sooner — it spends a full model round-trip per poll on
+something the agent was already going to be woken for.
+
+So the Stop hook reads `background_tasks` and `session_crons` out of its own payload:
+
+- **Work still in flight** → the stop is allowed. vibecast posts a `background_wait`
+  event naming what is being waited on, and the Server holds the session `isActive`
+  for a bounded window so the Runner does not read the deliberate quiet as
+  "agent done". The first real activity after the wake clears the hold; a station
+  that parks again simply takes a fresh one. The Runner's own max timeout is still
+  the backstop.
+- **`background_tasks` present and empty** → this is the true final stop, and every
+  gate runs as before: auto-git, and the `stop_broadcast` requirement.
+- **Key absent entirely** (codex, pi, older Claude Code) → unchanged legacy path.
+  Absent is not the same as empty, and treating it as "done" would end those jobs
+  early.
+
+A park never spends the `stop_broadcast` block budget. That budget is there to stop
+an endless "call stop_broadcast" loop, so it counts *consecutive* blocks and resets
+on a park and on each new prompt — as a lifetime budget it would auto-conclude a
+long station as `incomplete` on its third honest stop.
 
 ## Broadcast aggregation across stations
 
