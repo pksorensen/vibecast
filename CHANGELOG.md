@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.33](https://github.com/pksorensen/vibecast/compare/v0.1.32...v0.1.33) (2026-08-28)
+
+
+### Features
+
+* **hooks:** let a parked agent wait instead of forcing it to continue ([48f2a49](https://github.com/pksorensen/vibecast/commit/48f2a495ccb9ba979bf60e862ab1ee971c95b025))
+
 ## [0.1.32](https://github.com/pksorensen/vibecast/compare/v0.1.31...v0.1.32) (2026-08-17)
 
 
