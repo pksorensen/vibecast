@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.34](https://github.com/pksorensen/vibecast/compare/v0.1.33...v0.1.34) (2026-08-28)
+
+
+### Bug Fixes
+
+* **hooks:** only park when the server confirms it is holding the session ([0c5e237](https://github.com/pksorensen/vibecast/commit/0c5e237eded662f13de5c0315c1ed298aa08e5d4))
+
 ## [0.1.33](https://github.com/pksorensen/vibecast/compare/v0.1.32...v0.1.33) (2026-08-28)
 
 
