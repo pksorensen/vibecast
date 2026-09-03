@@ -119,6 +119,57 @@ func uploadWorkspaceArchive(cwd, serverHost, scheme, streamID string) {
 	fmt.Fprintf(os.Stderr, "[workspace-archive] upload status: %d\n", resp.StatusCode)
 }
 
+// sendNotification hands the platform a message for the project owner. It is the
+// only tool here that does not talk to the broadcast at all: a job that is parked
+// waiting for a human needs to reach a person who is not watching the stream.
+//
+// Auth is the runner's job token, exchanged nowhere — the platform verifies that
+// this runner owns an active job on a station, exactly as it does for federated
+// tokens. That is why no API key has to live in the station container, and why a
+// finished job cannot send anything.
+//
+// Everything comes from the environment the runner already exports. Outside a job
+// (a hand-run, a local session) those are unset, and the tool says so rather than
+// failing the caller in a way that reads like a delivery failure.
+func sendNotification(title, body, link string) (string, error) {
+	base := strings.TrimRight(os.Getenv("AGENTICS_BASE_URL"), "/")
+	token := os.Getenv("AGENTICS_TOKEN")
+	jobID := os.Getenv("AGENTICS_JOB_ID")
+	owner := os.Getenv("AGENTICS_OWNER")
+	project := os.Getenv("AGENTICS_PROJECT_NAME")
+	if base == "" || token == "" || jobID == "" || owner == "" || project == "" {
+		return "", fmt.Errorf("not running as an assembly-line job (AGENTICS_BASE_URL/TOKEN/JOB_ID/OWNER/PROJECT_NAME unset) — nothing to notify from")
+	}
+
+	payload, _ := json.Marshal(map[string]string{
+		"jobId": jobID,
+		"title": title,
+		"body":  body,
+		"url":   link,
+	})
+	endpoint := fmt.Sprintf("%s/api/owners/%s/projects/%s/notifications",
+		base, url.PathEscape(owner), url.PathEscape(project))
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("HTTP %d — %s", resp.StatusCode, strings.TrimSpace(string(out)))
+	}
+
+	return string(out), nil
+}
+
 func execCommand(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).Output()
 	return string(out), err
@@ -305,6 +356,28 @@ func mcpToolsList() []interface{} {
 			},
 		},
 		map[string]interface{}{
+			"name":        "send_notification",
+			"description": "Tell the human that this job needs them RIGHT NOW — an approval to tap, a code to compare, a decision only they can make. The station's own configuration decides where it lands (web push, email, SMS); you say what happened, not how to reach anyone. Use it for a run that is parked and waiting, never as a progress report: a notification nobody has to act on trains people to ignore the next one.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"title": map[string]interface{}{
+						"type":        "string",
+						"description": "One line, read on a lock screen. Say what is waiting, e.g. 'Approve MitID — daily reconciliation'.",
+					},
+					"body": map[string]interface{}{
+						"type":        "string",
+						"description": "What the person has to do, and anything they need in hand to do it — a one-time code to compare, the account in question.",
+					},
+					"url": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional link the notification opens — the task or the run.",
+					},
+				},
+				"required": []string{"title", "body"},
+			},
+		},
+		map[string]interface{}{
 			"name":        "share_image",
 			"description": "Share an image with the live broadcast audience. The image will be queued for the stream owner's approval before being shown to viewers. Alias for share_media.",
 			"inputSchema": map[string]interface{}{
@@ -387,9 +460,9 @@ func mcpToolsList() []interface{} {
 						"description": "OTLP HTTP endpoint host:port",
 					},
 					"insecure": map[string]interface{}{
-						"type":    "boolean",
+						"type":        "boolean",
 						"description": "Use HTTP instead of HTTPS (default: true)",
-						"default": true,
+						"default":     true,
 					},
 					"service_name": map[string]interface{}{
 						"type":        "string",
@@ -640,6 +713,28 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 			isError = true
 		} else {
 			resultText = body
+		}
+
+	case "send_notification":
+		var args struct {
+			Title string `json:"title"`
+			Body  string `json:"body"`
+			URL   string `json:"url"`
+		}
+		if params.Arguments != nil {
+			json.Unmarshal(params.Arguments, &args)
+		}
+		if strings.TrimSpace(args.Title) == "" || strings.TrimSpace(args.Body) == "" {
+			resultText = "title and body are required"
+			isError = true
+			break
+		}
+		text, err := sendNotification(args.Title, args.Body, args.URL)
+		if err != nil {
+			resultText = fmt.Sprintf("Failed to send notification: %v", err)
+			isError = true
+		} else {
+			resultText = text
 		}
 
 	case "share_image":
