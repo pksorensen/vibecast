@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.35](https://github.com/pksorensen/vibecast/compare/v0.1.34...v0.1.35) (2026-09-03)
+
+
+### Features
+
+* **mcp:** send_notification — nå mennesket når kørslen venter på det ([eb8b833](https://github.com/pksorensen/vibecast/commit/eb8b83380bf5eb7841a004ab8ad95c9a89052e27))
+
 ## [0.1.34](https://github.com/pksorensen/vibecast/compare/v0.1.33...v0.1.34) (2026-08-28)
 
 
