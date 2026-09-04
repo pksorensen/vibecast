@@ -278,7 +278,25 @@ func DoRestartClaude(sessionName string, resume bool, claudeSessionID string, pa
 	if err != nil {
 		logDebug("[restart] respawn-pane failed: %v (output: %s)\n", err, string(out))
 		span.SetAttributes(attribute.String("tmux.output", string(out)))
-		return fail(fmt.Errorf("respawn-pane failed: %w", err))
+
+		// "can't find window" means there is no pane left to respawn into: the agent
+		// exited while remain-on-exit was off for this window, and tmux took the whole
+		// window with it. Recreating it is the difference between recovering and leaving
+		// the session parked in the lobby answering nothing but "capture-pane error".
+		if !strings.Contains(string(out), "can't find window") {
+			return fail(fmt.Errorf("respawn-pane failed: %w", err))
+		}
+		logDebug("[restart] window %s is gone — recreating it\n", windowName)
+		mk := exec.Command("tmux", "new-window", "-t", sessionName, "-n", windowName,
+			"sh", "-c", wrappedCmd)
+		mk.Env = append(os.Environ(), "HISTFILE=")
+		if mkOut, mkErr := mk.CombinedOutput(); mkErr != nil {
+			logDebug("[restart] new-window fallback failed: %v (output: %s)\n", mkErr, string(mkOut))
+			span.SetAttributes(attribute.String("tmux.new_window_output", string(mkOut)))
+			return fail(fmt.Errorf("respawn-pane failed (%w) and new-window fallback failed: %w", err, mkErr))
+		}
+		exec.Command("tmux", "set-option", "-t", sessionName+":"+windowName, "-w", "remain-on-exit", "on").Run()
+		span.SetAttributes(attribute.Bool("tmux.window_recreated", true))
 	}
 
 	// Post-respawn sanity check: tmux respawn-pane returns 0 even when the new
@@ -596,6 +614,15 @@ func SpawnPane(sessionName, sessionID, paneId, name string, status *types.Shared
 		return nil, fmt.Errorf("failed to create tmux window %s: %w", paneId, err)
 	}
 
+	// remain-on-exit is a WINDOW option. StartStream sets it with
+	// `set-option -t <session>`, which tmux applies to that session's *current* window —
+	// so it landed on "info" and never on the agent window created here. The consequence
+	// was invisible until the agent exited: tmux removed this window outright, the pane
+	// the broadcaster was reading disappeared, ttyd fell back to the lobby, and the
+	// post-login restart then failed with "can't find window: main". Setting it on the
+	// window by name keeps a dead pane (and its exit output) on screen instead.
+	exec.Command("tmux", "set-option", "-t", sessionName+":"+paneId, "-w", "remain-on-exit", "on").Run()
+
 	// Spawn fkeybar in a bottom split pane only when VIBECAST_STREAM_FULL_WINDOW=1.
 	// By default (stream-pane-only mode) the split is omitted so viewers see only
 	// the Claude pane. Broadcaster F-key bindings remain active at the tmux session
@@ -851,7 +878,12 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		// Keep dead panes around so we can see Claude's exit output instead of the
 		// window vanishing and ttyd falling back to the lobby fkeybar. The post-respawn
 		// check in DoRestartClaude uses #{pane_dead} to detect immediate exits.
-		exec.Command("tmux", "set-option", "-t", sessionName, "remain-on-exit", "on").Run()
+		//
+		// This is a window option, so it covers only the window that exists right now.
+		// Windows created later — the agent's, above all — set it themselves in SpawnPane;
+		// don't be tempted to fold the two into one `-g -w`, which would change
+		// remain-on-exit for every session on the tmux server, including a developer's own.
+		exec.Command("tmux", "set-option", "-t", sessionName, "-w", "remain-on-exit", "on").Run()
 		exec.Command("tmux", "set-option", "-t", sessionName, "status", "on").Run()
 		// Subtle status bar — terminal default bg, brand red dot for LIVE, readable gray for the rest.
 		// Using 256-color codes instead of hex so it renders on terminals without truecolor.

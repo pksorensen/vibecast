@@ -68,6 +68,90 @@ func lockTmuxTarget(target string) func() {
 	return m.Unlock
 }
 
+// The labels answerMenu steers Claude Code's first-run gates to. Kept as constants
+// because each one is also the string the detector matches on, and the two drifting
+// apart is how a menu gets detected and then answered on the wrong line.
+const (
+	trustMenuOption      = "Yes, I trust this folder"
+	bypassMenuOption     = "Yes, I accept"
+	apiKeyMenuOption     = "Yes"
+	fullscreenMenuOption = "Not now"
+)
+
+// highlightedMenuOption returns the label of the currently selected option in a rendered
+// tmux pane. Claude Code marks the selection with "❯"; the rest of that line is the label.
+func highlightedMenuOption(rendered string) (string, bool) {
+	for _, line := range strings.Split(ansiRE.ReplaceAllString(rendered, ""), "\n") {
+		idx := strings.Index(line, "❯")
+		if idx < 0 {
+			continue
+		}
+		if label := strings.TrimSpace(line[idx+len("❯"):]); label != "" {
+			return label, true
+		}
+	}
+	return "", false
+}
+
+// answerMenu drives one of Claude Code's confirmation menus to the option whose label
+// contains want, and only then confirms it.
+//
+// These menus used to be answered by position — a bare Enter on an assumed default, or a
+// digit for an assumed numbering. Both assumptions belong to one Claude Code version and
+// both have since broken. In 2.1.260 the workspace-trust dialog reads
+//
+//	❯ No, exit
+//	  Yes, I trust this folder
+//
+// unnumbered, with the *exit* option selected, so the bare Enter that used to accept it
+// quits Claude before the job's first turn — measured on session 3y59cys8, which died
+// between the trust prompt and the next log line. The bypass-permissions screen is
+// unnumbered in the same version, where the digit keypress moves the highlight nowhere.
+//
+// Navigating survives both changes: step the highlight one option at a time, re-reading
+// the pane after every keypress, and press Enter only once the wanted label is actually
+// selected. Reverses direction when the list turns out not to wrap, and returns false
+// without pressing Enter if the option never comes up — leaving a screen up for a human
+// beats answering it wrong, which is the failure mode this whole helper exists to end.
+//
+// Callers hold the pane's send lock (see lockTmuxTarget) for the entire call: this is a
+// sequence of keystrokes that must land back-to-back, not one injection.
+func answerMenu(tmux func(args ...string) *exec.Cmd, target, want string) bool {
+	const maxSteps = 12
+	key := "Down"
+	prev := ""
+	for i := 0; i < maxSteps; i++ {
+		out, err := tmux("capture-pane", "-p", "-t", target).Output()
+		if err != nil {
+			logDebug("[menu] capture-pane failed while looking for %q: %v\n", want, err)
+			return false
+		}
+		cur, ok := highlightedMenuOption(string(out))
+		if !ok {
+			logDebug("[menu] no highlighted option on screen while looking for %q\n", want)
+			return false
+		}
+		if strings.Contains(cur, want) {
+			tmux("send-keys", "-t", target, "Enter").Run()
+			logDebug("[menu] selected %q after %d step(s)\n", cur, i)
+			return true
+		}
+		if cur == prev {
+			// The highlight did not move, so this end of the list does not wrap.
+			if key != "Down" {
+				logDebug("[menu] %q not reachable (stuck on %q)\n", want, cur)
+				return false
+			}
+			key = "Up"
+		}
+		prev = cur
+		tmux("send-keys", "-t", target, key).Run()
+		time.Sleep(120 * time.Millisecond)
+	}
+	logDebug("[menu] gave up looking for %q after %d steps\n", want, maxSteps)
+	return false
+}
+
 // isLocalURL returns true for URLs pointing at the loopback interface or
 // other unroutable hosts that aren't useful to broadcast to viewers.
 func isLocalURL(u string) bool {
@@ -310,6 +394,7 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 	loginSuccessAnsweredSnap := false
 	securityNotesAnsweredSnap := false
 	bypassAnsweredSnap := false
+	fullscreenAnsweredSnap := false
 	tourAnsweredSnap := false
 	apiKeyGateAnsweredSnap := false
 	notLoggedInAnsweredSnap := false
@@ -517,16 +602,20 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 					// Auto-trust if allowedDir is unset (spawn-mode default) OR if the prompt's
 					// path matches the explicitly allowed dir (in-process mode).
 					if allowedDir == "" || strings.Contains(rendered, allowedDir) {
-						// The trust dialog defaults to "❯ 1. Yes, I trust this folder".
-						// Send Enter alone — sending "1" + Enter in one call doesn't
-						// register reliably in BubbleTea; Enter on the default is enough.
-						func() {
+						// Navigate to the trust option by name rather than pressing Enter on
+						// whatever happens to be selected — see answerMenu for the version
+						// change that turned that Enter into "No, exit".
+						answered := func() bool {
 							defer lockTmuxTarget(snapTmuxTarget + ".0")()
-							tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+							return answerMenu(tmuxCmd, snapTmuxTarget+".0", trustMenuOption)
 						}()
-						logDebug("[broadcast] auto-answered workspace trust prompt (allowedDir=%q)\n", allowedDir)
-						span.SetAttributes(attribute.Bool("auto_answered", true))
-						trustDialogAnswered.Store(true)
+						logDebug("[broadcast] workspace trust prompt: answered=%v (allowedDir=%q)\n", answered, allowedDir)
+						span.SetAttributes(attribute.Bool("auto_answered", answered))
+						// Only latch on success, so a capture that arrived mid-repaint gets
+						// another go on the next tick instead of leaving the dialog up forever.
+						if answered {
+							trustDialogAnswered.Store(true)
+						}
 					} else {
 						logDebug("[broadcast] trust prompt path does not match allowed dir %q — not auto-answering\n", allowedDir)
 						span.SetAttributes(attribute.Bool("auto_answered", false))
@@ -578,19 +667,36 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 						schedulePostLoginRestart("security-notes screen")
 					}
 				}
-				// Bypass-permissions confirmation. Default highlight is "1. No, exit" so a
-				// blind Enter would kill Claude. Job mode runs Claude with --dangerously-skip-permissions
-				// by design, so explicitly accept option 2 ("Yes, I accept"). Send the digit then Enter.
+				// Bypass-permissions confirmation. The selected option is "No, exit", so a
+				// blind Enter kills Claude — and in 2.1.260 the list lost its numbering, so
+				// the digit "2" that used to move the highlight now does nothing at all
+				// (measured in the container). Job mode runs Claude with
+				// --dangerously-skip-permissions by design, so steer to "Yes, I accept".
 				if !bypassAnsweredSnap && strings.Contains(plain, "Bypass Permissions mode") &&
-					strings.Contains(plain, "Yes, I accept") {
-					func() {
+					strings.Contains(plain, bypassMenuOption) {
+					bypassAnsweredSnap = func() bool {
 						defer lockTmuxTarget(snapTmuxTarget + ".0")()
-						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "2").Run()
-						time.Sleep(100 * time.Millisecond)
-						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+						return answerMenu(tmuxCmd, snapTmuxTarget+".0", bypassMenuOption)
 					}()
-					logDebug("[broadcast] auto-answered bypass-permissions warning (option 2 — accept)\n")
-					bypassAnsweredSnap = true
+					logDebug("[broadcast] bypass-permissions warning: answered=%v\n", bypassAnsweredSnap)
+				}
+
+				// Fullscreen-renderer offer (claude 2.1.260):
+				//
+				//   Try the new fullscreen renderer?
+				//   ❯ 1. Yes, try it
+				//     2. Not now
+				//
+				// Decline it. The whole broadcast reads the pane through tmux capture-pane,
+				// and an alternate-screen renderer is exactly the thing that stops producing
+				// readable text there — a viewer would get a blank or garbled stream.
+				if !fullscreenAnsweredSnap && strings.Contains(plain, "fullscreen renderer") &&
+					strings.Contains(plain, fullscreenMenuOption) {
+					fullscreenAnsweredSnap = func() bool {
+						defer lockTmuxTarget(snapTmuxTarget + ".0")()
+						return answerMenu(tmuxCmd, snapTmuxTarget+".0", fullscreenMenuOption)
+					}()
+					logDebug("[broadcast] fullscreen-renderer offer: declined=%v\n", fullscreenAnsweredSnap)
 				}
 
 				// Custom-API-key gate — appears when ANTHROPIC_API_KEY is set in the
@@ -603,20 +709,17 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 				//     1. Yes
 				//   ❯ 2. No (recommended)
 				//
-				// Default highlight is "2. No" — a blind Enter would REJECT the key and
-				// fall through to the login picker. The key was deliberately provided by
-				// the runner env, so explicitly select "1. Yes" (digit then Enter, same
-				// style as the bypass-permissions handler).
+				// The selection sits on "No" — a blind Enter would REJECT the key and fall
+				// through to the login picker. The key was deliberately provided by the
+				// runner env, so steer to "Yes" by name (same as the bypass handler; the
+				// numbering shown above is 2.1.207's and is gone in 2.1.260).
 				if !apiKeyGateAnsweredSnap && strings.Contains(plain, "Detected a custom API key") &&
 					strings.Contains(plain, "use this API key?") {
-					func() {
+					apiKeyGateAnsweredSnap = func() bool {
 						defer lockTmuxTarget(snapTmuxTarget + ".0")()
-						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "1").Run()
-						time.Sleep(100 * time.Millisecond)
-						tmuxCmd("send-keys", "-t", snapTmuxTarget+".0", "Enter").Run()
+						return answerMenu(tmuxCmd, snapTmuxTarget+".0", apiKeyMenuOption)
 					}()
-					logDebug("[broadcast] auto-answered custom-API-key gate (option 1 — use env key)\n")
-					apiKeyGateAnsweredSnap = true
+					logDebug("[broadcast] custom-API-key gate: accepted env key=%v\n", apiKeyGateAnsweredSnap)
 				}
 
 				// "Learn the moves" onboarding tour gate — appears on first run of newer
@@ -1325,13 +1428,15 @@ func connectBroadcastOnce(sessionID string, broadcastID string, serverHost strin
 								// explicitly allowed dir (in-process mode). Mirrors the snapshot-loop
 								// handler above; the two must agree or they race and one refuses.
 								if allowedDir == "" || strings.Contains(renderedStr, allowedDir) {
-									func() {
+									answered := func() bool {
 										defer lockTmuxTarget(target)()
-										tmuxCmd("send-keys", "-t", target, "Enter").Run()
+										return answerMenu(tmuxCmd, target, trustMenuOption)
 									}()
-									logDebug("[broadcast] auto-answered workspace trust prompt (allowedDir=%q)\n", allowedDir)
-									span.SetAttributes(attribute.Bool("auto_answered", true))
-									trustDialogAnswered.Store(true)
+									logDebug("[broadcast] workspace trust prompt: answered=%v (allowedDir=%q)\n", answered, allowedDir)
+									span.SetAttributes(attribute.Bool("auto_answered", answered))
+									if answered {
+										trustDialogAnswered.Store(true)
+									}
 								} else {
 									logDebug("[broadcast] trust prompt path does not match allowed dir %q — not auto-answering\n", allowedDir)
 									span.SetAttributes(attribute.Bool("auto_answered", false))
