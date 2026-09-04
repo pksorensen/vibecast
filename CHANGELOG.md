@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.36](https://github.com/pksorensen/vibecast/compare/v0.1.35...v0.1.36) (2026-09-04)
+
+
+### Bug Fixes
+
+* **broadcast:** vælg menupunktet ved navn i stedet for at gætte på defaulten ([f1319f4](https://github.com/pksorensen/vibecast/commit/f1319f4f2f34bfec6e524b9ccfd247fa8a3be72d))
+
 ## [0.1.35](https://github.com/pksorensen/vibecast/compare/v0.1.34...v0.1.35) (2026-09-03)
 
 
