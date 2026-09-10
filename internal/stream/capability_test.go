@@ -2,6 +2,18 @@ package stream
 
 import "testing"
 
+func TestTmuxPropagatedEnvironmentKeysIncludeAnthropicProvider(t *testing.T) {
+	keys := make(map[string]bool)
+	for _, key := range tmuxPropagatedEnvironmentKeys() {
+		keys[key] = true
+	}
+	for _, key := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"} {
+		if !keys[key] {
+			t.Errorf("tmux propagation is missing %s", key)
+		}
+	}
+}
+
 // TestSpecFromEnv covers the env boundary: specFromEnv reads the per-station launch
 // configuration from the environment into the agent-neutral LaunchSpec. The flag-string
 // logic itself is tested in internal/agent (claude_flags_test.go, claude_test.go).

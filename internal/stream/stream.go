@@ -33,6 +33,30 @@ import (
 
 var debugLog = os.Getenv("VIBECAST_DEBUG") != ""
 
+func tmuxPropagatedEnvironmentKeys() []string {
+	return []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_INSECURE",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+		"OTEL_SERVICE_NAME",
+		"OTEL_RESOURCE_ATTRIBUTES",
+		"OTEL_TRACES_EXPORTER",
+		"OTEL_LOGS_EXPORTER",
+		"OTEL_TRACES_EXPORT_INTERVAL",
+		"OTEL_LOGS_EXPORT_INTERVAL",
+		"CLAUDE_CODE_ENABLE_TELEMETRY",
+		"CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
+		"ANTHROPIC_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_BASE_URL",
+	}
+}
+
 func logDebug(format string, args ...interface{}) {
 	if debugLog {
 		fmt.Fprintf(os.Stderr, format, args...)
@@ -791,24 +815,10 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		// tmux new-window inherits the session global env, not the calling process env.
 		// Signal-specific endpoint vars (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT etc.) are required
 		// by Claude Code in addition to the generic OTEL_EXPORTER_OTLP_ENDPOINT used by vibecast.
-		for _, key := range []string{
-			"OTEL_EXPORTER_OTLP_ENDPOINT",
-			"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-			"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
-			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-			"OTEL_EXPORTER_OTLP_INSECURE",
-			"OTEL_EXPORTER_OTLP_PROTOCOL",
-			"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
-			"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
-			"OTEL_SERVICE_NAME",
-			"OTEL_RESOURCE_ATTRIBUTES",
-			"OTEL_TRACES_EXPORTER",
-			"OTEL_LOGS_EXPORTER",
-			"OTEL_TRACES_EXPORT_INTERVAL",
-			"OTEL_LOGS_EXPORT_INTERVAL",
-			"CLAUDE_CODE_ENABLE_TELEMETRY",
-			"CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
-		} {
+		// Claude is spawned through tmux, whose server environment can predate
+		// vibecast. The list includes provider configuration as well as telemetry;
+		// otherwise API-key/gateway jobs fall back to the interactive login flow.
+		for _, key := range tmuxPropagatedEnvironmentKeys() {
 			if val := os.Getenv(key); val != "" {
 				exec.Command("tmux", "set-environment", "-t", sessionName, key, val).Run()
 			}
