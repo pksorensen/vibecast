@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.37](https://github.com/pksorensen/vibecast/compare/v0.1.36...v0.1.37) (2026-09-18)
+
+
+### Bug Fixes
+
+* **auto-git:** propagate commit-back credentials through tmux ([cfdcf90](https://github.com/pksorensen/vibecast/commit/cfdcf906c71d07540ae6064f7ebc6b8eedab24c1))
+* propagate model provider env into tmux ([26fddfc](https://github.com/pksorensen/vibecast/commit/26fddfc03db28476d7f4900a16b5e4d1fd9a7d69))
+
 ## [0.1.36](https://github.com/pksorensen/vibecast/compare/v0.1.35...v0.1.36) (2026-09-04)
 
 
