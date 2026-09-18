@@ -14,6 +14,22 @@ func TestTmuxPropagatedEnvironmentKeysIncludeAnthropicProvider(t *testing.T) {
 	}
 }
 
+func TestTmuxPropagatedEnvironmentKeysIncludeCommitBackCredentials(t *testing.T) {
+	keys := make(map[string]bool)
+	for _, key := range tmuxPropagatedEnvironmentKeys() {
+		keys[key] = true
+	}
+	for _, key := range []string{
+		"AGENTICS_COMMIT_BACK_URL",
+		"AGENTICS_COMMIT_BACK_CREDENTIAL_KIND",
+		"AGENTICS_COMMIT_BACK_TOKEN",
+	} {
+		if !keys[key] {
+			t.Errorf("tmux propagation is missing %s", key)
+		}
+	}
+}
+
 // TestSpecFromEnv covers the env boundary: specFromEnv reads the per-station launch
 // configuration from the environment into the agent-neutral LaunchSpec. The flag-string
 // logic itself is tested in internal/agent (claude_flags_test.go, claude_test.go).
