@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.38](https://github.com/pksorensen/vibecast/compare/v0.1.37...v0.1.38) (2026-11-20)
+
+
+### Features
+
+* headless operation for an embedded ALP server ([a2dd162](https://github.com/pksorensen/vibecast/commit/a2dd162ded045307ebaf3abe8d277d0bbdbdf664))
+* headless operation for an embedded ALP server ([1292f2e](https://github.com/pksorensen/vibecast/commit/1292f2e4c6702da09f150067a1f5ccca44005611))
+
+
+### Bug Fixes
+
+* **codex:** forward AGENTICS_AUTO_GIT and the commit-back variables into the vibecast MCP server by name, so stop_broadcast's uncommitted-changes refusal and push work under codex ([1292f2e](https://github.com/pksorensen/vibecast/commit/1292f2e4c6702da09f150067a1f5ccca44005611))
+* **hooks:** make the auto-git Stop block actually block, with a budget ([a45fdcb](https://github.com/pksorensen/vibecast/commit/a45fdcb040a5d665cdab80e51818e29fd25640e3))
+
 ## [0.1.37](https://github.com/pksorensen/vibecast/compare/v0.1.36...v0.1.37) (2026-09-18)
 
 
