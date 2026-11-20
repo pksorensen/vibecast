@@ -93,6 +93,9 @@ func IsLocalHost(host string) bool {
 
 // BuildViewerURL constructs the viewer URL for a given server host and broadcast ID.
 func BuildViewerURL(serverHost, broadcastID string) string {
+	if ep := ParseServer(serverHost); ep.Explicit {
+		return ep.URL("/live/" + broadcastID)
+	}
 	if IsLocalHost(serverHost) {
 		return fmt.Sprintf("http://%s/live/%s", serverHost, broadcastID)
 	}
@@ -102,6 +105,9 @@ func BuildViewerURL(serverHost, broadcastID string) string {
 
 // BuildJoinURL constructs the PIN-entry join URL for a given server host.
 func BuildJoinURL(serverHost string) string {
+	if ep := ParseServer(serverHost); ep.Explicit {
+		return ep.URL("/join")
+	}
 	if IsLocalHost(serverHost) {
 		return fmt.Sprintf("http://%s/join", serverHost)
 	}

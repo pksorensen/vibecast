@@ -209,18 +209,10 @@ func Execute() {
 	}()
 
 	// Start chat connection goroutine — use the live session ID once streaming starts.
-	go func() {
-		for i := 0; i < 60; i++ {
-			time.Sleep(2 * time.Second)
-			status.Mu.Lock()
-			chatSessionID := status.SessionID
-			status.Mu.Unlock()
-			if chatSessionID == "" {
-				chatSessionID = "default"
-			}
-			broadcast.ConnectChat(chatSessionID, p)
-		}
-	}()
+	// The legacy viewer chat is part of the live broadcast: skipped with VIBECAST_BROADCAST=off.
+	if util.BroadcastEnabled() {
+		go connectLegacyChat(status, p)
+	}
 
 	// Run the headless TUI in a goroutine
 	done := make(chan struct{})
@@ -303,4 +295,19 @@ func Execute() {
 	}
 
 	cleanup()
+}
+
+// connectLegacyChat keeps (re)connecting the live-viewer chat WebSocket, using the live
+// session ID once streaming starts.
+func connectLegacyChat(status *types.SharedStatus, p *tea.Program) {
+	for i := 0; i < 60; i++ {
+		time.Sleep(2 * time.Second)
+		status.Mu.Lock()
+		chatSessionID := status.SessionID
+		status.Mu.Unlock()
+		if chatSessionID == "" {
+			chatSessionID = "default"
+		}
+		broadcast.ConnectChat(chatSessionID, p)
+	}
 }

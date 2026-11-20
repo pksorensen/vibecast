@@ -54,6 +54,9 @@ func tmuxPropagatedEnvironmentKeys() []string {
 		"ANTHROPIC_API_KEY",
 		"ANTHROPIC_AUTH_TOKEN",
 		"ANTHROPIC_BASE_URL",
+		// Codex env-key auth: the provider written from VIBECAST_CODEX_BASE_URL
+		// (agent.CodexProviderTOML) reads its key from OPENAI_API_KEY.
+		"OPENAI_API_KEY",
 		"AGENTICS_COMMIT_BACK_URL",
 		"AGENTICS_COMMIT_BACK_CREDENTIAL_KIND",
 		"AGENTICS_COMMIT_BACK_TOKEN",
@@ -939,11 +942,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 		// in the tmux session before Claude inherits them
 		pinCode := ""
 		{
-			scheme := "https"
-			if util.IsLocalHost(serverHost) {
-				scheme = "http"
-			}
-			apiURL := fmt.Sprintf("%s://%s/api/lives/session-event", scheme, serverHost)
+			apiURL := util.ServerURL(serverHost, "/api/lives/session-event")
 
 			eventBody := map[string]interface{}{
 				"sessionId":   sessionID,
@@ -955,7 +954,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 				eventBody["user"] = claims
 			}
 			bodyBytes, _ := json.Marshal(eventBody)
-			resp, err := http.Post(apiURL, "application/json", bytes.NewReader(bodyBytes))
+			resp, err := util.PostLivesJSON(apiURL, bodyBytes)
 			if err == nil {
 				defer resp.Body.Close()
 				var result struct {
@@ -987,7 +986,7 @@ func StartStream(promptSharing, shareProjectInfo bool, projectName string, resum
 					}
 					if strings.Contains(v, "://localhost") || strings.Contains(v, "://127.0.0.1") {
 						if parsed, err := url.Parse(v); err == nil {
-							parsed.Host = serverHost
+							parsed.Host = util.ServerHostPort(serverHost)
 							v = parsed.String()
 						}
 					}
@@ -1128,11 +1127,7 @@ func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 		var serverStartedAt int64
 		var serverEnv map[string]string
 		{
-			scheme := "https"
-			if util.IsLocalHost(serverHost) {
-				scheme = "http"
-			}
-			apiURL := fmt.Sprintf("%s://%s/api/lives/session-event", scheme, serverHost)
+			apiURL := util.ServerURL(serverHost, "/api/lives/session-event")
 			eventBody := map[string]interface{}{
 				"sessionId": sessionID,
 				"event":     "start",
@@ -1141,7 +1136,7 @@ func ResumeStream(sessionID string, status *types.SharedStatus) tea.Cmd {
 				eventBody["user"] = claims
 			}
 			bodyBytes, _ := json.Marshal(eventBody)
-			resp, err := http.Post(apiURL, "application/json", bytes.NewReader(bodyBytes))
+			resp, err := util.PostLivesJSON(apiURL, bodyBytes)
 			if err == nil {
 				defer resp.Body.Close()
 				var result struct {
@@ -1430,11 +1425,7 @@ func StopStream(pid int, sessionName, sessionID string, promptSharing bool, pane
 			if host == "" {
 				host = util.GetServerHost()
 			}
-			scheme := "https"
-			if util.IsLocalHost(host) {
-				scheme = "http"
-			}
-			apiURL := fmt.Sprintf("%s://%s/api/lives/session-event", scheme, host)
+			apiURL := util.ServerURL(host, "/api/lives/session-event")
 			eventData := map[string]interface{}{
 				"sessionId": sessionID,
 				"event":     "end",
@@ -1460,8 +1451,10 @@ func StopStream(pid int, sessionName, sessionID string, promptSharing bool, pane
 				eventData["jobId"] = jobId
 			}
 			eventBody, _ := json.Marshal(eventData)
-			if _, err := http.Post(apiURL, "application/json", bytes.NewReader(eventBody)); err != nil {
+			if resp, err := util.PostLivesJSON(apiURL, eventBody); err != nil {
 				fmt.Fprintf(os.Stderr, "[stop] failed to post session-event end: %v\n", err)
+			} else {
+				resp.Body.Close()
 			}
 		}
 
@@ -1525,11 +1518,7 @@ func ApproveImage(sessionID, imageID string, approved bool) {
 	if sf == nil {
 		return
 	}
-	scheme := "https"
-	if util.IsLocalHost(sf.ServerHost) {
-		scheme = "http"
-	}
-	url := fmt.Sprintf("%s://%s/api/lives/image-approve", scheme, sf.ServerHost)
+	url := util.ServerURL(sf.ServerHost, "/api/lives/image-approve")
 	payload, _ := json.Marshal(map[string]interface{}{
 		"sessionId": sessionID,
 		"imageId":   imageID,
@@ -1540,6 +1529,7 @@ func ApproveImage(sessionID, imageID string, approved bool) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	util.ApplyAgenticsToken(req)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {

@@ -208,11 +208,23 @@ func (codexAdapter) Prepare(in PrepareInput) (map[string]string, error) {
 	// a bare dotted key at EOF would inherit the previous table's context (e.g. land under
 	// [model_providers.x]).
 	var toml strings.Builder
-	if base, err := os.ReadFile(filepath.Join(realDir, "config.toml")); err == nil {
+	base, baseErr := os.ReadFile(filepath.Join(realDir, "config.toml"))
+	// With VIBECAST_CODEX_BASE_URL (the runner sets it for Foundry and other
+	// OpenAI-compatible endpoints) and no provider of the operator's own, select
+	// an env-key provider. The top-level key must precede every table.
+	providerURL := strings.TrimSpace(os.Getenv("VIBECAST_CODEX_BASE_URL"))
+	addProvider := providerURL != "" && !codexConfigSelectsProvider(string(base))
+	if addProvider {
+		toml.WriteString("model_provider = \"" + CodexEnvProviderName + "\"\n")
+	}
+	if baseErr == nil {
 		toml.Write(base)
 		if !strings.HasSuffix(toml.String(), "\n") {
 			toml.WriteByte('\n')
 		}
+	}
+	if addProvider {
+		toml.WriteString(CodexProviderTOML(providerURL))
 	}
 	if in.Workspace != "" {
 		trustPaths := map[string]bool{in.Workspace: true}
@@ -390,13 +402,77 @@ func CodexHooksJSON(vibecastBin string) []byte {
 //     --dangerously-bypass-approvals-and-sandbox would remove approvals AND the guard-gated
 //     approval path too; this never touches either.
 //
+//  3. tool_timeout_sec. The ask_question tool blocks until the question is answered
+//     (VIBECAST_ASK_TIMEOUT, default 30 minutes); codex's default per-call MCP timeout is
+//     60 seconds, so it is raised to the ask timeout plus a minute of slack.
+//
+//  4. env_vars = ["AGENTICS_TOKEN"], only when AGENTICS_TOKEN is set: forwards the runner
+//     bearer from codex's own environment by name (verified against codex-cli 0.167.0, which
+//     parses and validates both env_vars and tool_timeout_sec), so the secret is not written
+//     into config.toml.
+//
 // env keys are emitted sorted for deterministic output (golden-test stable). An empty env
 // map omits the `env` line entirely.
+// CodexEnvProviderName is the model provider vibecast adds when VIBECAST_CODEX_BASE_URL is set.
+const CodexEnvProviderName = "vibecast-env"
+
+// codexConfigSelectsProvider reports whether a config.toml already chooses a
+// model provider with a top-level `model_provider = …` (before any table).
+func codexConfigSelectsProvider(cfg string) bool {
+	for _, line := range strings.Split(cfg, "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "[") {
+			return false
+		}
+		if k, _, ok := strings.Cut(t, "="); ok && strings.TrimSpace(k) == "model_provider" {
+			return true
+		}
+	}
+	return false
+}
+
+// CodexProviderTOML is an OpenAI Responses provider at baseURL whose key codex
+// reads from OPENAI_API_KEY (forwarded into the tmux env by stream).
+func CodexProviderTOML(baseURL string) string {
+	esc := strings.ReplaceAll(strings.ReplaceAll(strings.TrimRight(baseURL, "/"), `\`, `\\`), `"`, `\"`)
+	return "\n[model_providers." + CodexEnvProviderName + "]\n" +
+		"name = \"vibecast (VIBECAST_CODEX_BASE_URL)\"\n" +
+		"base_url = \"" + esc + "\"\n" +
+		"env_key = \"OPENAI_API_KEY\"\n" +
+		"wire_api = \"responses\"\n"
+}
+
+// CodexMCPForwardedEnv are the env names passed by name into codex's vibecast MCP
+// subprocess (codex gives MCP servers a sanitized environment).
+var CodexMCPForwardedEnv = []string{
+	"AGENTICS_TOKEN",
+	"AGENTICS_AUTO_GIT",
+	"AGENTICS_COMMIT_MESSAGE_HINT",
+	"AGENTICS_COMMIT_BACK_URL",
+	"AGENTICS_COMMIT_BACK_CREDENTIAL_KIND",
+	"AGENTICS_COMMIT_BACK_TOKEN",
+	"AGENTICS_REPO_TOKEN",
+}
+
 func CodexMCPServersTOML(vibecastBin string, env map[string]string) string {
 	var b strings.Builder
 	b.WriteString("\n[mcp_servers.vibecast]\n")
 	fmt.Fprintf(&b, "command = %s\n", tomlBasicString(vibecastBin))
 	b.WriteString("args = [\"mcp\", \"serve\"]\n")
+	// The MCP subprocess derives its ask_question control-socket wait from
+	// VIBECAST_ASK_TIMEOUT, and codex strips its environment: forward it (only when set) so
+	// that wait agrees with tool_timeout_sec below and the control server's wait, both of
+	// which are computed in this process.
+	if v := strings.TrimSpace(os.Getenv("VIBECAST_ASK_TIMEOUT")); v != "" {
+		if _, ok := env["VIBECAST_ASK_TIMEOUT"]; !ok {
+			withTimeout := make(map[string]string, len(env)+1)
+			for k, val := range env {
+				withTimeout[k] = val
+			}
+			withTimeout["VIBECAST_ASK_TIMEOUT"] = v
+			env = withTimeout
+		}
+	}
 	if len(env) > 0 {
 		keys := make([]string, 0, len(env))
 		for k := range env {
@@ -409,9 +485,33 @@ func CodexMCPServersTOML(vibecastBin string, env map[string]string) string {
 		}
 		fmt.Fprintf(&b, "env = { %s }\n", strings.Join(parts, ", "))
 	}
+	// Secrets and job switches are forwarded by name (env_vars) so their values never land
+	// in config.toml; codex strips everything else from the MCP subprocess. The runner
+	// bearer carries /api/lives uploads; the AGENTICS_AUTO_GIT family drives
+	// stop_broadcast's uncommitted-changes refusal and commit-back push — without them
+	// auto-git is silently a no-op under codex. Only names that are set are listed.
+	var forward []string
+	for _, k := range CodexMCPForwardedEnv {
+		if strings.TrimSpace(os.Getenv(k)) != "" {
+			forward = append(forward, tomlBasicString(k))
+		}
+	}
+	if len(forward) > 0 {
+		fmt.Fprintf(&b, "env_vars = [%s]\n", strings.Join(forward, ", "))
+	}
 	// Auto-approve vibecast's own control tools (never the workspace sandbox — see doc above).
 	b.WriteString("default_tools_approval_mode = \"approve\"\n")
+	// ask_question holds its call open until a human answers; codex's default MCP tool
+	// timeout (60s) would cut it off long before that.
+	fmt.Fprintf(&b, "tool_timeout_sec = %d\n", codexMCPToolTimeoutSec())
 	return b.String()
+}
+
+// codexMCPToolTimeoutSec is the per-call MCP timeout written for the vibecast server: the
+// ask_question wait plus 60s, so the control-socket call times out (with a readable
+// result) before codex abandons the tool call.
+func codexMCPToolTimeoutSec() int {
+	return int(util.AskQuestionTimeout().Seconds()) + 60
 }
 
 // tomlBasicString wraps s as a TOML basic string, escaping backslash and double-quote (the

@@ -408,6 +408,18 @@ func extractUsageFromTranscript(lines []map[string]interface{}) map[string]inter
 	}
 }
 
+// setLivesAuth authenticates a hook's /api/lives/* call: the runner's AGENTICS_TOKEN
+// when set (an embedded ALP server binds the call to the job by it), otherwise the
+// saved login token as before.
+func setLivesAuth(req *http.Request) {
+	if util.ApplyAgenticsToken(req) {
+		return
+	}
+	if token, _, authErr := auth.GetValidToken(); authErr == nil && token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
 // HookPostMetadata posts metadata to the server.
 func HookPostMetadata(sf *types.SessionFile, payload []byte) {
 	hookPostMetadataResponse(sf, payload)
@@ -424,12 +436,7 @@ func hookPostMetadataResponse(sf *types.SessionFile, payload []byte) []byte {
 		))
 	defer span.End()
 
-	scheme := "https"
-	if util.IsLocalHost(sf.ServerHost) {
-		scheme = "http"
-	}
-
-	url := fmt.Sprintf("%s://%s/api/lives/metadata", scheme, sf.ServerHost)
+	url := util.ServerURL(sf.ServerHost, "/api/lives/metadata")
 	span.SetAttributes(attribute.String("http.url", url))
 	util.DebugLog("hookPostMetadata: POST %s (payload %d bytes)", url, len(payload))
 	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
@@ -440,9 +447,7 @@ func hookPostMetadataResponse(sf *types.SessionFile, payload []byte) []byte {
 		return nil
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if token, _, authErr := auth.GetValidToken(); authErr == nil && token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+	setLivesAuth(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
@@ -1243,10 +1248,19 @@ func handleHookStop() {
 		util.DebugLog("[stop] server did not confirm a hold — falling through to stop enforcement")
 	}
 
-	// Auto-git: block stop if uncommitted changes exist
+	// Auto-git: block stop if uncommitted changes exist — a bounded number of
+	// consecutive times. A tree the agent cannot clean (a file it may not commit)
+	// would otherwise block every stop until the job times out; past the budget the
+	// stop proceeds and stop_broadcast's own uncommitted-changes refusal still holds.
 	if os.Getenv("AGENTICS_AUTO_GIT") == "1" {
 		out, err := exec.Command("git", "-C", cwd, "status", "--porcelain").Output()
-		if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+		dirty := err == nil && len(strings.TrimSpace(string(out))) > 0
+		if !dirty {
+			resetAutoGitBlockCount(sf.SessionID)
+		} else if n := readAutoGitBlockCount(sf.SessionID); n >= maxAutoGitStopBlocks {
+			util.DebugLog("[auto-git] %d consecutive dirty-tree blocks — letting stop proceed", n)
+		} else {
+			writeAutoGitBlockCount(sf.SessionID, n+1)
 			hint := os.Getenv("AGENTICS_COMMIT_MESSAGE_HINT")
 			if hint == "" {
 				hint = "Use semantic commits: feat(scope): description"
@@ -1260,7 +1274,11 @@ func handleHookStop() {
 				"reason":   reason,
 			})
 			os.Stdout.Write(output)
-			os.Exit(1)
+			// Exit 2 is the blocking code in both Claude Code and codex (reason on
+			// stderr); exit 1 is a non-blocking hook error — codex then shows
+			// "Stop hook (failed)" and the agent goes idle with the work uncommitted.
+			fmt.Fprint(os.Stderr, reason)
+			os.Exit(2)
 		}
 	}
 
@@ -1424,12 +1442,8 @@ func handleHookPermissionRequest() {
 
 	// Poll for the resolved vote (2s interval, 31s total — slightly longer than the 30s voteDeadline
 	// so the server's auto-resolve fires first and the hook sees a resolved answer before timing out).
-	scheme := "https"
-	if util.IsLocalHost(sf.ServerHost) {
-		scheme = "http"
-	}
-	voteURL := fmt.Sprintf("%s://%s/api/lives/question-vote?sessionId=%s&toolUseId=%s",
-		scheme, sf.ServerHost, sf.SessionID, toolUseId)
+	voteURL := util.ServerURL(sf.ServerHost, fmt.Sprintf("/api/lives/question-vote?sessionId=%s&toolUseId=%s",
+		sf.SessionID, toolUseId))
 	util.DebugLog("[permission-request] polling voteURL=%s", voteURL)
 
 	deadline := time.Now().Add(31 * time.Second)
@@ -1456,9 +1470,7 @@ func handleHookPermissionRequest() {
 			util.DebugLog("[permission-request] poll #%d request error: %v", attempt, err)
 			continue
 		}
-		if token, _, authErr := auth.GetValidToken(); authErr == nil && token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
+		setLivesAuth(req)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			pollSpan.RecordError(err)
@@ -1610,6 +1622,32 @@ func handleHookPostCompact() {
 	payload, _ := json.Marshal(p)
 	HookPostMetadata(sf, payload)
 	os.Exit(0)
+}
+
+// maxAutoGitStopBlocks bounds consecutive Stop-hook blocks for an uncommitted tree.
+const maxAutoGitStopBlocks = 3
+
+func autoGitBlockPath(streamID string) string {
+	return filepath.Join(transcriptCursorDir(streamID), "autogit_stop_blocks")
+}
+
+func readAutoGitBlockCount(streamID string) int {
+	data, err := os.ReadFile(autoGitBlockPath(streamID))
+	if err != nil {
+		return 0
+	}
+	var n int
+	fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &n)
+	return n
+}
+
+func writeAutoGitBlockCount(streamID string, n int) {
+	os.MkdirAll(transcriptCursorDir(streamID), 0755)
+	os.WriteFile(autoGitBlockPath(streamID), []byte(fmt.Sprintf("%d", n)), 0644)
+}
+
+func resetAutoGitBlockCount(streamID string) {
+	os.Remove(autoGitBlockPath(streamID))
 }
 
 func readStopBlockCount(streamID string) int {

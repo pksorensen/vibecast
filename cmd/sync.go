@@ -163,11 +163,7 @@ func syncFile(filePath, sessionID, serverHost, token string) {
 
 	fmt.Printf("  Total lines: %d\n", len(allLines))
 
-	scheme := "https"
-	if util.IsLocalHost(serverHost) {
-		scheme = "http"
-	}
-	syncURL := fmt.Sprintf("%s://%s/api/lives/sync", scheme, serverHost)
+	syncURL := util.ServerURL(serverHost, "/api/lives/sync")
 
 	totalCounts := map[string]int{}
 

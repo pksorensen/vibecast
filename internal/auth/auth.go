@@ -159,12 +159,12 @@ func DecodeJWTUser(token string) (*types.AuthUserInfo, error) {
 
 // FetchAuthConfig fetches the auth configuration from the server.
 func FetchAuthConfig(serverHost string) (*types.AuthConfigResponse, error) {
-	scheme := "https"
-	if util.IsLocalHost(serverHost) {
-		scheme = "http"
+	req, err := http.NewRequest("GET", util.ServerURL(serverHost, "/api/lives/auth-config"), nil)
+	if err != nil {
+		return nil, err
 	}
-	url := fmt.Sprintf("%s://%s/api/lives/auth-config", scheme, serverHost)
-	resp, err := http.Get(url)
+	util.ApplyAgenticsToken(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

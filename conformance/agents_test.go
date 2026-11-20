@@ -9,6 +9,7 @@
 package conformance
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -95,6 +96,7 @@ func TestConformance(t *testing.T) {
 			t.Run("C09_resume_relaunch", func(t *testing.T) { scenarioC09(t, agent) })
 			t.Run("C10_session_end_reported", func(t *testing.T) { scenarioC10(t, agent) })
 			t.Run("C11_prompt_injection_tui", func(t *testing.T) { scenarioC11(t, agent) })
+			t.Run("C13_ask_question", func(t *testing.T) { scenarioC13(t, agent) })
 		})
 	}
 }
@@ -112,6 +114,16 @@ func bringLive(t *testing.T, agent string, cfg harness.LaunchConfig) (*harness.S
 	cfg.Agent = agent
 	cfg.VibecastBin = vibecastBin
 	cfg.ServerAddr = mock.Addr
+	if broadcastOff() {
+		// The embedded-ALP-server shape: a full http:// URL, the runner bearer, and no
+		// broadcast. RelaunchForResume reuses cfg, so C09's relaunch runs the same way.
+		cfg.ServerAddr = "http://" + mock.Addr
+		if cfg.ExtraEnv == nil {
+			cfg.ExtraEnv = map[string]string{}
+		}
+		cfg.ExtraEnv["VIBECAST_BROADCAST"] = "off"
+		cfg.ExtraEnv["AGENTICS_TOKEN"] = conformanceToken
+	}
 	cfg.BaseDir = t.TempDir()
 	sess, err := harness.Launch(cfg)
 	if err != nil {
@@ -155,6 +167,27 @@ func scenarioC01(t *testing.T, agent string) {
 		return false
 	})
 
+	if broadcastOff() {
+		// No broadcast: the always-on frames vibecast would have sent on the WebSocket
+		// arrive as POST /api/lives/metadata instead, stamped with the sessionId.
+		for _, subtype := range []string{"capabilities", "stream_info"} {
+			subtype := subtype
+			waitFor(t, 20*time.Second, subtype+" metadata POST (broadcast off)", func() bool {
+				for _, p := range mock.MetadataPostsOfSubtype(subtype) {
+					if p.Decoded["sessionId"] == sess.SessionID {
+						return true
+					}
+				}
+				return false
+			})
+		}
+		// Give any stray broadcast/chat/snapshot attempt time to show up before asserting
+		// it never happened.
+		time.Sleep(5 * time.Second)
+		assertBroadcastOffTraffic(t, mock)
+		return
+	}
+
 	waitFor(t, 20*time.Second, "broadcaster WS connect", func() bool {
 		for _, c := range mock.BroadcastConns() {
 			if c.SessionID == sess.SessionID {
@@ -171,6 +204,43 @@ func scenarioC01(t *testing.T, agent string) {
 	waitFor(t, 20*time.Second, "stream_info metadata frame (shareProjectInfo=true)", func() bool {
 		return len(mock.MetaFramesOfSubtype("stream_info")) > 0
 	})
+}
+
+// conformanceToken is the AGENTICS_TOKEN the broadcast-off run hands vibecast.
+const conformanceToken = "conformance-runner-token"
+
+// broadcastOff reports whether this conformance run exercises VIBECAST_BROADCAST=off,
+// set on the `go test` process itself (same spellings vibecast accepts).
+func broadcastOff() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("VIBECAST_BROADCAST"))) {
+	case "off", "false", "0", "no":
+		return true
+	}
+	return false
+}
+
+// assertBroadcastOffTraffic checks that a broadcast-off run never opened the broadcast
+// or chat WebSocket or posted a relay snapshot, and that every /api/lives call carried
+// the runner bearer.
+func assertBroadcastOffTraffic(t *testing.T, mock *harness.MockServer) {
+	t.Helper()
+	if n := len(mock.BroadcastConns()); n != 0 {
+		t.Errorf("broadcast off: %d broadcaster WebSocket connection(s)", n)
+	}
+	for _, prefix := range []string{"/api/lives/chat/ws", "/_relay/snapshot"} {
+		if n := len(mock.RequestsWithPrefix(prefix)); n != 0 {
+			t.Errorf("broadcast off: %d request(s) to %s", n, prefix)
+		}
+	}
+	lives := mock.RequestsWithPrefix("/api/lives/")
+	if len(lives) == 0 {
+		t.Errorf("broadcast off: no /api/lives calls recorded")
+	}
+	for _, r := range lives {
+		if r.Auth != "Bearer "+conformanceToken {
+			t.Errorf("broadcast off: %s %s carried Authorization %q", r.Method, r.Path, r.Auth)
+		}
+	}
 }
 
 // scenarioC02 (session-identity): once the agent is live it must report a session identity
@@ -911,4 +981,91 @@ func pollUntil(timeout time.Duration, pred func() bool) bool {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return false
+}
+
+// scenarioC13 (ask-question): the agent calls vibecast's `ask_question` MCP tool. vibecast
+// must post the question as an AskUserQuestion-shaped tool_use metadata event, wait for the
+// answer on pending-answer (the mock answers any vibecast-ask- question with a nonce, once)
+// and hand that answer back as the tool result — never typing it into the pane. The tool
+// result surfaces through the PostToolUse hook as tool_use_end.toolResponse.
+func scenarioC13(t *testing.T, agent string) {
+	nonce := newNonce(t)
+	promptFile := filepath.Join(t.TempDir(), "initial-prompt.txt")
+	// Claude also has a built-in AskUserQuestion tool; the prompt must steer it to the
+	// vibecast MCP server's tool instead, which is the one under test.
+	body := "This is an automated integration check. Call the ask_question tool provided by the " +
+		"vibecast MCP server (its tool name ends in ask_question) exactly once, with question " +
+		"\"Which build tag should I use?\" and options [\"alpha\", \"beta\"]. Do NOT use the built-in " +
+		"AskUserQuestion tool. Then reply with one short sentence that repeats the answer the tool returned. " +
+		"Do not use any other tools."
+	if err := os.WriteFile(promptFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	answer := "build tag " + nonce
+	sess, mock := bringLive(t, agent, harness.LaunchConfig{
+		// Broadcast off is the embedded-ALP-server shape, which runs in job mode: the
+		// job-mode answer loop and ask_question's own poller then race for an answer the
+		// mock clears on first read, and the tool must still get it.
+		JobMode:     broadcastOff(),
+		PromptShare: true,
+		ShareInfo:   true,
+		ExtraEnv:    map[string]string{"VIBECAST_INITIAL_PROMPT_FILE": promptFile},
+	})
+	mock.SetAskAnswer(answer)
+
+	var qid string
+	waitFor(t, 150*time.Second, "AskUserQuestion-shaped question from ask_question", func() bool {
+		for _, p := range mock.MetadataPostsOfSubtype("tool_use") {
+			id, _ := p.Decoded["toolUseId"].(string)
+			if p.Decoded["toolName"] != "AskUserQuestion" || !strings.HasPrefix(id, "vibecast-ask-") || p.Decoded["sessionId"] != sess.SessionID {
+				continue
+			}
+			in, _ := p.Decoded["toolInput"].(map[string]any)
+			qs, _ := in["questions"].([]any)
+			if len(qs) != 1 {
+				t.Fatalf("toolInput.questions = %v", in["questions"])
+			}
+			q, _ := qs[0].(map[string]any)
+			opts, _ := q["options"].([]any)
+			if q["question"] == nil || q["multiSelect"] != false || len(opts) == 0 {
+				t.Fatalf("question shape = %v", q)
+			}
+			for _, o := range opts {
+				if om, _ := o.(map[string]any); om["label"] == nil {
+					t.Fatalf("option without label: %v", o)
+				}
+			}
+			qid = id
+			return true
+		}
+		return false
+	})
+
+	waitFor(t, 90*time.Second, "ask_question tool result carrying the answer", func() bool {
+		for _, e := range mock.MetadataPostsOfSubtype("tool_use_end") {
+			name, _ := e.Decoded["toolName"].(string)
+			if !strings.Contains(name, "ask_question") {
+				continue
+			}
+			resp, _ := json.Marshal(e.Decoded["toolResponse"])
+			if strings.Contains(string(resp), nonce) {
+				return true
+			}
+		}
+		return false
+	})
+
+	// The answer went back through the tool, not into the pane as keystrokes: had it been
+	// typed and submitted, UserPromptSubmit would have reported it as a prompt.
+	for _, p := range mock.MetadataPostsOfSubtype("prompt") {
+		raw, _ := json.Marshal(p.Decoded)
+		if strings.Contains(string(raw), nonce) {
+			t.Errorf("answer was submitted into the agent pane as a prompt: %s", raw)
+		}
+	}
+	if broadcastOff() {
+		assertBroadcastOffTraffic(t, mock)
+	}
+	t.Logf("ask_question %s answered with %q via pending-answer", qid, answer)
 }

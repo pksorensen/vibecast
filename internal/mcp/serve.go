@@ -16,8 +16,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/pksorensen/vibecast/internal/broadcast"
 	"github.com/pksorensen/vibecast/internal/control"
 	"github.com/pksorensen/vibecast/internal/hooks"
 	"github.com/pksorensen/vibecast/internal/session"
@@ -37,10 +39,24 @@ var skipDirs = map[string]bool{
 	"build":        true,
 }
 
+// mcpServerBase returns scheme://host[:port][/path] for a session's server host. A full
+// URL (embedded ALP server) keeps its own scheme; a bare host keeps this file's historical
+// rule (localhost/127.* => http, else https).
+func mcpServerBase(serverHost string) string {
+	if ep := util.ParseServer(serverHost); ep.Explicit {
+		return ep.BaseURL()
+	}
+	scheme := "https"
+	if strings.HasPrefix(serverHost, "localhost") || strings.HasPrefix(serverHost, "127.") {
+		scheme = "http"
+	}
+	return scheme + "://" + serverHost
+}
+
 // uploadWorkspaceArchive creates a zip of the workspace and uploads it to the server.
 // It tries `git archive HEAD` first (clean, only committed files). Falls back to
 // a full directory zip excluding common large dirs.
-func uploadWorkspaceArchive(cwd, serverHost, scheme, streamID string) {
+func uploadWorkspaceArchive(cwd, serverBase, streamID string) {
 	var zipData []byte
 
 	// Try git archive first — only works if there are commits
@@ -98,7 +114,7 @@ func uploadWorkspaceArchive(cwd, serverHost, scheme, streamID string) {
 		return
 	}
 
-	uploadURL := fmt.Sprintf("%s://%s/api/lives/sessions/%s/workspace-archive", scheme, serverHost, streamID)
+	uploadURL := fmt.Sprintf("%s/api/lives/sessions/%s/workspace-archive", serverBase, streamID)
 	req, err := http.NewRequest("PUT", uploadURL, bytes.NewReader(zipData))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[workspace-archive] build request error: %v\n", err)
@@ -168,6 +184,34 @@ func sendNotification(title, body, link string) (string, error) {
 	}
 
 	return string(out), nil
+}
+
+// askQuestionViaControl forwards ask_question to the vibecast process over the control
+// socket (POST /ask-question) and returns the tool result text. The control call is held
+// open until the answer arrives, so its client timeout is the ask timeout plus slack.
+func askQuestionViaControl(sockPath string, args broadcast.AskQuestionRequest) (string, bool) {
+	if strings.TrimSpace(args.Question) == "" {
+		return "question is required", true
+	}
+	payload, _ := json.Marshal(args)
+	body, code, err := control.ControlHTTPRequestWithBodyTimeout(sockPath, "POST", "/ask-question", payload,
+		util.AskQuestionTimeout()+30*time.Second)
+	if err != nil {
+		return fmt.Sprintf("Failed to ask question: %v", err), true
+	}
+	var res struct {
+		Answer string `json:"answer"`
+		Error  string `json:"error"`
+	}
+	_ = json.Unmarshal([]byte(body), &res)
+	if code != http.StatusOK {
+		msg := res.Error
+		if msg == "" {
+			msg = strings.TrimSpace(body)
+		}
+		return fmt.Sprintf("Question not answered: %s", msg), true
+	}
+	return res.Answer, false
 }
 
 func execCommand(name string, args ...string) (string, error) {
@@ -284,6 +328,14 @@ func HandleMCPServe() {
 			resp = handleMCPPromptGet(req, sockPath)
 
 		case "tools/call":
+			// ask_question blocks until a human answers; run it off the read loop so the
+			// client can keep talking to the server (other tools, pings) meanwhile.
+			if mcpToolName(req.Params) == "ask_question" {
+				go func(req types.JsonrpcRequest) {
+					writeMCPResponse(handleMCPToolCall(req, sockPath, &selectedStreamID))
+				}(req)
+				continue
+			}
 			resp = handleMCPToolCall(req, sockPath, &selectedStreamID)
 
 		default:
@@ -299,10 +351,29 @@ func HandleMCPServe() {
 		}
 
 		if resp != nil {
-			out, _ := json.Marshal(resp)
-			fmt.Fprintf(os.Stdout, "%s\n", out)
+			writeMCPResponse(resp)
 		}
 	}
+}
+
+// mcpStdoutMu serializes JSON-RPC responses on stdout: ask_question replies are written
+// from their own goroutine, concurrently with the read loop's replies.
+var mcpStdoutMu sync.Mutex
+
+func writeMCPResponse(resp *types.JsonrpcResponse) {
+	out, _ := json.Marshal(resp)
+	mcpStdoutMu.Lock()
+	defer mcpStdoutMu.Unlock()
+	fmt.Fprintf(os.Stdout, "%s\n", out)
+}
+
+// mcpToolName extracts params.name from a tools/call request ("" if absent).
+func mcpToolName(params json.RawMessage) string {
+	var p struct {
+		Name string `json:"name"`
+	}
+	_ = json.Unmarshal(params, &p)
+	return p.Name
 }
 
 func mcpToolsList() []interface{} {
@@ -353,6 +424,25 @@ func mcpToolsList() []interface{} {
 					},
 				},
 				"required": []string{"text"},
+			},
+		},
+		map[string]interface{}{
+			"name":        "ask_question",
+			"description": "Ask the human operator a question and wait for the answer. Use it when you cannot proceed without a decision or a piece of information only they have. The call blocks until the question is answered (or times out) and returns the answer text as the result. Offer options when the choice is between known alternatives; omit them for a free-text answer.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"question": map[string]interface{}{
+						"type":        "string",
+						"description": "The question, phrased so it can be answered without other context.",
+					},
+					"options": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Optional answer choices. The answer is one of these labels (or free text if the human writes their own).",
+					},
+				},
+				"required": []string{"question"},
 			},
 		},
 		map[string]interface{}{
@@ -663,11 +753,7 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 						serverHost = "agentics.dk"
 					}
 				}
-				scheme := "https"
-				if strings.HasPrefix(serverHost, "localhost") || strings.HasPrefix(serverHost, "127.") {
-					scheme = "http"
-				}
-				go uploadWorkspaceArchive(cwd, serverHost, scheme, sf.SessionID)
+				go uploadWorkspaceArchive(cwd, mcpServerBase(serverHost), sf.SessionID)
 			}
 		}
 
@@ -714,6 +800,13 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 		} else {
 			resultText = body
 		}
+
+	case "ask_question":
+		var args broadcast.AskQuestionRequest
+		if params.Arguments != nil {
+			json.Unmarshal(params.Arguments, &args)
+		}
+		resultText, isError = askQuestionViaControl(sockPath, args)
 
 	case "send_notification":
 		var args struct {
@@ -860,19 +953,22 @@ func handleMCPToolCall(req types.JsonrpcRequest, sockPath string, selectedStream
 				serverHost = "agentics.dk"
 			}
 		}
-		scheme := "https"
-		if strings.HasPrefix(serverHost, "localhost") || strings.HasPrefix(serverHost, "127.") {
-			scheme = "http"
-		}
-		uploadURL := fmt.Sprintf("%s://%s/api/lives/media/upload?sessionId=%s&mimeType=%s&fileName=%s",
-			scheme,
-			serverHost,
+		uploadURL := fmt.Sprintf("%s/api/lives/media/upload?sessionId=%s&mimeType=%s&fileName=%s",
+			mcpServerBase(serverHost),
 			sf.SessionID,
 			url.QueryEscape(mimeType),
 			url.QueryEscape(fileName),
 		)
 
-		uploadResp, err := http.Post(uploadURL, mimeType, bytes.NewReader(fileData))
+		uploadResp, err := func() (*http.Response, error) {
+			req, err := http.NewRequest("POST", uploadURL, bytes.NewReader(fileData))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", mimeType)
+			util.ApplyAgenticsToken(req)
+			return http.DefaultClient.Do(req)
+		}()
 		if err != nil || uploadResp.StatusCode != 200 {
 			errMsg := fmt.Sprintf("Upload failed")
 			if err != nil {

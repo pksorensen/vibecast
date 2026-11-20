@@ -11,10 +11,15 @@ import (
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/pksorensen/vibecast/internal/util"
 )
 
 // Connect performs a plain WebSocket handshake to host on the given path.
 func Connect(host, path string) (net.Conn, error) {
+	// Accept a full-URL AGENTICS_SERVER value; the legacy chat socket has always been
+	// plain ws, so only the host[:port] part is used here.
+	host = util.ServerHostPort(host)
 	conn, err := net.Dial("tcp", host)
 	if err != nil {
 		return nil, err
@@ -46,20 +51,20 @@ func Connect(host, path string) (net.Conn, error) {
 }
 
 // ConnectWithProtocol connects with an optional subprotocol and TLS support for non-localhost hosts.
+//
+// host is either a bare "host[:port]" (localhost/127.0.0.1 => plain ws, anything else =>
+// wss on :443 unless a port is given — the historical rule) or a full URL whose scheme is
+// honoured ("http://h:p" => ws, "https://h" => wss). A URL's path is prefixed to path.
 func ConnectWithProtocol(host, path, protocol string) (net.Conn, *bufio.Reader, error) {
-	isLocal := strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1")
+	ep := util.ParseServer(host)
 
 	var conn net.Conn
 	var err error
 
-	if isLocal {
-		conn, err = net.Dial("tcp", host)
+	if !ep.TLS() {
+		conn, err = net.Dial("tcp", ep.DialAddr())
 	} else {
-		dialHost := host
-		if !strings.Contains(host, ":") {
-			dialHost = host + ":443"
-		}
-		conn, err = tls.Dial("tcp", dialHost, &tls.Config{ServerName: strings.Split(host, ":")[0]})
+		conn, err = tls.Dial("tcp", ep.DialAddr(), &tls.Config{ServerName: strings.Trim(ep.Hostname(), "[]")})
 	}
 	if err != nil {
 		return nil, nil, err
@@ -69,14 +74,9 @@ func ConnectWithProtocol(host, path, protocol string) (net.Conn, *bufio.Reader, 
 	rand.Read(keyBytes)
 	wsKey := base64.StdEncoding.EncodeToString(keyBytes)
 
-	httpHost := host
+	httpHost := ep.Host
 
-	scheme := "http"
-	if !isLocal {
-		scheme = "https"
-	}
-
-	req, _ := http.NewRequest("GET", scheme+"://"+httpHost+path, nil)
+	req, _ := http.NewRequest("GET", ep.URL(path), nil)
 	req.Header.Set("Host", httpHost)
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Connection", "Upgrade")

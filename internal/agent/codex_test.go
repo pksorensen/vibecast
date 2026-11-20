@@ -335,13 +335,16 @@ func TestCodexHooksJSON(t *testing.T) {
 // — without it the server can't resolve the control socket and stop_broadcast (C07) fails.
 func TestCodexMCPServersTOML(t *testing.T) {
 	const bin = "/opt/vibecast/vibecast"
+	t.Setenv("VIBECAST_ASK_TIMEOUT", "")
+	t.Setenv("AGENTICS_TOKEN", "")
 
 	got := CodexMCPServersTOML(bin, map[string]string{"VIBECAST_HOME": "/base/home"})
 	want := "\n[mcp_servers.vibecast]\n" +
 		"command = \"/opt/vibecast/vibecast\"\n" +
 		"args = [\"mcp\", \"serve\"]\n" +
 		"env = { VIBECAST_HOME = \"/base/home\" }\n" +
-		"default_tools_approval_mode = \"approve\"\n"
+		"default_tools_approval_mode = \"approve\"\n" +
+		"tool_timeout_sec = 1860\n"
 	if got != want {
 		t.Errorf("MCP TOML mismatch\n got: %q\nwant: %q", got, want)
 	}
@@ -388,5 +391,18 @@ func TestForResolvesCodex(t *testing.T) {
 	}
 	if ad.BinaryName() != "codex" {
 		t.Errorf("BinaryName() = %q, want codex", ad.BinaryName())
+	}
+}
+
+// With AGENTICS_TOKEN set the bearer is forwarded to the sanitized MCP subprocess by name
+// only — the secret value must never be written into config.toml.
+func TestCodexMCPServersTOMLForwardsAgenticsTokenByName(t *testing.T) {
+	t.Setenv("AGENTICS_TOKEN", "rnt_secret_value")
+	got := CodexMCPServersTOML("/opt/vibecast/vibecast", map[string]string{"VIBECAST_HOME": "/h"})
+	if !strings.Contains(got, "env_vars = [\"AGENTICS_TOKEN\"]\n") {
+		t.Errorf("AGENTICS_TOKEN not forwarded: %q", got)
+	}
+	if strings.Contains(got, "rnt_secret_value") {
+		t.Errorf("token value leaked into config.toml: %q", got)
 	}
 }
