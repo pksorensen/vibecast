@@ -1248,10 +1248,19 @@ func handleHookStop() {
 		util.DebugLog("[stop] server did not confirm a hold — falling through to stop enforcement")
 	}
 
-	// Auto-git: block stop if uncommitted changes exist
+	// Auto-git: block stop if uncommitted changes exist — a bounded number of
+	// consecutive times. A tree the agent cannot clean (a file it may not commit)
+	// would otherwise block every stop until the job times out; past the budget the
+	// stop proceeds and stop_broadcast's own uncommitted-changes refusal still holds.
 	if os.Getenv("AGENTICS_AUTO_GIT") == "1" {
 		out, err := exec.Command("git", "-C", cwd, "status", "--porcelain").Output()
-		if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+		dirty := err == nil && len(strings.TrimSpace(string(out))) > 0
+		if !dirty {
+			resetAutoGitBlockCount(sf.SessionID)
+		} else if n := readAutoGitBlockCount(sf.SessionID); n >= maxAutoGitStopBlocks {
+			util.DebugLog("[auto-git] %d consecutive dirty-tree blocks — letting stop proceed", n)
+		} else {
+			writeAutoGitBlockCount(sf.SessionID, n+1)
 			hint := os.Getenv("AGENTICS_COMMIT_MESSAGE_HINT")
 			if hint == "" {
 				hint = "Use semantic commits: feat(scope): description"
@@ -1265,7 +1274,11 @@ func handleHookStop() {
 				"reason":   reason,
 			})
 			os.Stdout.Write(output)
-			os.Exit(1)
+			// Exit 2 is the blocking code in both Claude Code and codex (reason on
+			// stderr); exit 1 is a non-blocking hook error — codex then shows
+			// "Stop hook (failed)" and the agent goes idle with the work uncommitted.
+			fmt.Fprint(os.Stderr, reason)
+			os.Exit(2)
 		}
 	}
 
@@ -1609,6 +1622,32 @@ func handleHookPostCompact() {
 	payload, _ := json.Marshal(p)
 	HookPostMetadata(sf, payload)
 	os.Exit(0)
+}
+
+// maxAutoGitStopBlocks bounds consecutive Stop-hook blocks for an uncommitted tree.
+const maxAutoGitStopBlocks = 3
+
+func autoGitBlockPath(streamID string) string {
+	return filepath.Join(transcriptCursorDir(streamID), "autogit_stop_blocks")
+}
+
+func readAutoGitBlockCount(streamID string) int {
+	data, err := os.ReadFile(autoGitBlockPath(streamID))
+	if err != nil {
+		return 0
+	}
+	var n int
+	fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &n)
+	return n
+}
+
+func writeAutoGitBlockCount(streamID string, n int) {
+	os.MkdirAll(transcriptCursorDir(streamID), 0755)
+	os.WriteFile(autoGitBlockPath(streamID), []byte(fmt.Sprintf("%d", n)), 0644)
+}
+
+func resetAutoGitBlockCount(streamID string) {
+	os.Remove(autoGitBlockPath(streamID))
 }
 
 func readStopBlockCount(streamID string) int {
