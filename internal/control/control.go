@@ -15,6 +15,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/pksorensen/vibecast/internal/broadcast"
 	"github.com/pksorensen/vibecast/internal/session"
 	"github.com/pksorensen/vibecast/internal/telemetry"
 	"github.com/pksorensen/vibecast/internal/types"
@@ -169,6 +170,51 @@ func StartControlServer(status *types.SharedStatus, program *tea.Program, restar
 
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"ok":true}`)
+	})
+
+	// ask_question (MCP tool): the MCP server is a separate stdio process — under Codex
+	// with a sanitized environment that lacks AGENTICS_TOKEN/AGENTICS_SERVER — so it asks
+	// this process, which owns the session, the server host and the token, to raise the
+	// question and wait for the answer. The request is held open until the answer arrives
+	// or VIBECAST_ASK_TIMEOUT passes; the answer is returned, never typed into the pane.
+	mux.HandleFunc("/ask-question", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body broadcast.AskQuestionRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Question) == "" {
+			http.Error(w, `{"error":"question is required"}`, http.StatusBadRequest)
+			return
+		}
+		status.Mu.Lock()
+		sessionID := status.SessionID
+		serverHost := status.ServerHost
+		status.Mu.Unlock()
+		if serverHost == "" {
+			serverHost = util.GetServerHost()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if sessionID == "" {
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"error":"no live session"}`)
+			return
+		}
+		claudeSessionID := ""
+		if sf := session.FindActiveSession(); sf != nil && sf.SessionID == sessionID {
+			claudeSessionID = sf.ClaudeSessionID
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), util.AskQuestionTimeout())
+		defer cancel()
+		res, err := broadcast.AskQuestion(ctx, sessionID, serverHost, claudeSessionID, body)
+		if err != nil {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			data, _ := json.Marshal(map[string]interface{}{"questionId": res.QuestionID, "error": err.Error()})
+			w.Write(data)
+			return
+		}
+		data, _ := json.Marshal(res)
+		w.Write(data)
 	})
 
 	mux.HandleFunc("/change-server", func(w http.ResponseWriter, r *http.Request) {
@@ -463,4 +509,36 @@ func ControlHTTPRequestWithBody(sockPath, method, path string, body []byte) (str
 		return "", err
 	}
 	return string(respBody), nil
+}
+
+// ControlHTTPRequestWithBodyTimeout is ControlHTTPRequestWithBody with a caller-chosen
+// client timeout (for long-held calls such as /ask-question). It also returns the
+// HTTP status code.
+func ControlHTTPRequestWithBodyTimeout(sockPath, method, path string, body []byte, timeout time.Duration) (string, int, error) {
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", sockPath)
+			},
+		},
+		Timeout: timeout,
+	}
+
+	req, err := http.NewRequest(method, "http://localhost"+path, bytes.NewReader(body))
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("control server unavailable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", resp.StatusCode, err
+	}
+	return string(respBody), resp.StatusCode, nil
 }

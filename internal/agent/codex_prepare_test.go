@@ -51,12 +51,12 @@ func TestCodexPrepareFreshSeed(t *testing.T) {
 	cfgStr := string(cfg)
 	for _, sub := range []string{
 		"[model_providers.pks-foundry]", // operator config inherited
-		`trust_level = "trusted"`,        // workspace trusted
-		"[mcp_servers.vibecast]",         // MCP server registered
-		"VIBECAST_HOME",                  // env forwarding key
-		"/run/vibecast-home",             // env forwarding value
-		`args = ["mcp", "serve"]`,        // MCP command args
-		"default_tools_approval_mode",    // vibecast control tools auto-approved
+		`trust_level = "trusted"`,       // workspace trusted
+		"[mcp_servers.vibecast]",        // MCP server registered
+		"VIBECAST_HOME",                 // env forwarding key
+		"/run/vibecast-home",            // env forwarding value
+		`args = ["mcp", "serve"]`,       // MCP command args
+		"default_tools_approval_mode",   // vibecast control tools auto-approved
 	} {
 		if !strings.Contains(cfgStr, sub) {
 			t.Errorf("config.toml missing %q\n---\n%s", sub, cfgStr)
@@ -152,6 +152,44 @@ func TestClaudePiPrepareNoop(t *testing.T) {
 		}
 		if env != nil {
 			t.Errorf("%s Prepare env = %v, want nil", ad.Kind(), env)
+		}
+	}
+}
+
+// VIBECAST_ASK_TIMEOUT is forwarded to the vibecast MCP subprocess (codex strips its env),
+// so its ask_question control-socket wait matches tool_timeout_sec and the control
+// server's wait, which are both computed from it in this process. Unset → not written.
+func TestCodexPrepareForwardsAskTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		val, wantEnv, wantTimeout string
+	}{
+		{"2h", `VIBECAST_ASK_TIMEOUT = "2h"`, "tool_timeout_sec = 7260\n"},
+		{"", "", "tool_timeout_sec = 1860\n"},
+	} {
+		realDir := t.TempDir()
+		t.Setenv("CODEX_HOME", realDir)
+		t.Setenv("VIBECAST_ASK_TIMEOUT", tc.val)
+		env, err := codexAdapter{}.Prepare(PrepareInput{
+			BaseDir:      t.TempDir(),
+			VibecastBin:  "/usr/local/bin/vibecast",
+			VibecastHome: "/run/vibecast-home",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := os.ReadFile(filepath.Join(env["CODEX_HOME"], "config.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(cfg)
+		if tc.wantEnv != "" && !strings.Contains(s, tc.wantEnv) {
+			t.Errorf("VIBECAST_ASK_TIMEOUT=%q: config.toml lacks %q\n%s", tc.val, tc.wantEnv, s)
+		}
+		if tc.wantEnv == "" && strings.Contains(s, "VIBECAST_ASK_TIMEOUT") {
+			t.Errorf("unset VIBECAST_ASK_TIMEOUT must not be written:\n%s", s)
+		}
+		if !strings.Contains(s, tc.wantTimeout) {
+			t.Errorf("VIBECAST_ASK_TIMEOUT=%q: want %q in\n%s", tc.val, tc.wantTimeout, s)
 		}
 	}
 }

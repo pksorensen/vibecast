@@ -408,6 +408,18 @@ func extractUsageFromTranscript(lines []map[string]interface{}) map[string]inter
 	}
 }
 
+// setLivesAuth authenticates a hook's /api/lives/* call: the runner's AGENTICS_TOKEN
+// when set (an embedded ALP server binds the call to the job by it), otherwise the
+// saved login token as before.
+func setLivesAuth(req *http.Request) {
+	if util.ApplyAgenticsToken(req) {
+		return
+	}
+	if token, _, authErr := auth.GetValidToken(); authErr == nil && token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
 // HookPostMetadata posts metadata to the server.
 func HookPostMetadata(sf *types.SessionFile, payload []byte) {
 	hookPostMetadataResponse(sf, payload)
@@ -424,12 +436,7 @@ func hookPostMetadataResponse(sf *types.SessionFile, payload []byte) []byte {
 		))
 	defer span.End()
 
-	scheme := "https"
-	if util.IsLocalHost(sf.ServerHost) {
-		scheme = "http"
-	}
-
-	url := fmt.Sprintf("%s://%s/api/lives/metadata", scheme, sf.ServerHost)
+	url := util.ServerURL(sf.ServerHost, "/api/lives/metadata")
 	span.SetAttributes(attribute.String("http.url", url))
 	util.DebugLog("hookPostMetadata: POST %s (payload %d bytes)", url, len(payload))
 	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
@@ -440,9 +447,7 @@ func hookPostMetadataResponse(sf *types.SessionFile, payload []byte) []byte {
 		return nil
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if token, _, authErr := auth.GetValidToken(); authErr == nil && token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+	setLivesAuth(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
@@ -1424,12 +1429,8 @@ func handleHookPermissionRequest() {
 
 	// Poll for the resolved vote (2s interval, 31s total — slightly longer than the 30s voteDeadline
 	// so the server's auto-resolve fires first and the hook sees a resolved answer before timing out).
-	scheme := "https"
-	if util.IsLocalHost(sf.ServerHost) {
-		scheme = "http"
-	}
-	voteURL := fmt.Sprintf("%s://%s/api/lives/question-vote?sessionId=%s&toolUseId=%s",
-		scheme, sf.ServerHost, sf.SessionID, toolUseId)
+	voteURL := util.ServerURL(sf.ServerHost, fmt.Sprintf("/api/lives/question-vote?sessionId=%s&toolUseId=%s",
+		sf.SessionID, toolUseId))
 	util.DebugLog("[permission-request] polling voteURL=%s", voteURL)
 
 	deadline := time.Now().Add(31 * time.Second)
@@ -1456,9 +1457,7 @@ func handleHookPermissionRequest() {
 			util.DebugLog("[permission-request] poll #%d request error: %v", attempt, err)
 			continue
 		}
-		if token, _, authErr := auth.GetValidToken(); authErr == nil && token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
+		setLivesAuth(req)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			pollSpan.RecordError(err)

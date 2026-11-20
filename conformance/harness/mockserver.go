@@ -69,6 +69,25 @@ type MockServer struct {
 	// resumeState, when set, is merged into the session-event response for resume
 	// (event=="start" with an existing session). Left nil for the base scenarios.
 	resumeState map[string]any
+
+	// requests logs every HTTP request (WS upgrades included) with its Authorization
+	// header, so scenarios can assert the runner bearer and which endpoints were hit.
+	requests []RequestRecord
+	// askAnswer, when set, auto-answers ask_question: a metadata POST carrying an
+	// AskUserQuestion tool_use whose toolUseId has the vibecast-ask- prefix queues
+	// {questionId: toolUseId, answer: askAnswer} on that session's pending-answer.
+	askAnswer string
+	// pending holds the queued pending-answer per sessionId. Like agentics.dk it is
+	// cleared on the first read that returns it.
+	pending map[string]map[string]any
+}
+
+// RequestRecord is one HTTP request the mock received.
+type RequestRecord struct {
+	Method string
+	Path   string
+	Auth   string
+	At     time.Time
 }
 
 // NewMockServer starts a mock server on a loopback port and returns it running.
@@ -80,7 +99,12 @@ func NewMockServer() (*MockServer, error) {
 	m := &MockServer{Addr: ln.Addr().String(), listener: ln}
 	mux := http.NewServeMux()
 	m.routes(mux)
-	m.srv = &http.Server{Handler: mux}
+	m.srv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		m.requests = append(m.requests, RequestRecord{Method: r.Method, Path: r.URL.Path, Auth: r.Header.Get("Authorization"), At: now()})
+		m.mu.Unlock()
+		mux.ServeHTTP(w, r)
+	})}
 	go m.srv.Serve(ln)
 	return m, nil
 }
@@ -120,8 +144,38 @@ func (m *MockServer) routes(mux *http.ServeMux) {
 		body := readJSONBody(r)
 		m.mu.Lock()
 		m.metadataPosts = append(m.metadataPosts, SessionEvent{Raw: rawOf(body), Decoded: body, At: now()})
+		if m.askAnswer != "" && body["toolName"] == "AskUserQuestion" {
+			sid, _ := body["sessionId"].(string)
+			tid, _ := body["toolUseId"].(string)
+			if sid != "" && strings.HasPrefix(tid, "vibecast-ask-") {
+				if m.pending == nil {
+					m.pending = map[string]map[string]any{}
+				}
+				m.pending[sid] = map[string]any{"questionId": tid, "questionType": "tool", "answer": m.askAnswer, "options": []any{}, "multiSelect": false}
+			}
+		}
 		m.mu.Unlock()
 		writeJSON(w, map[string]any{"ok": true})
+	})
+
+	// Per-session pending-answer (GET /api/lives/sessions/{id}/pending-answer): serves a
+	// queued answer once, else {questionId:null, answer:null}.
+	mux.HandleFunc("/api/lives/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/api/lives/sessions/")
+		sid, tail, _ := strings.Cut(rest, "/")
+		if tail != "pending-answer" {
+			writeJSON(w, map[string]any{})
+			return
+		}
+		m.mu.Lock()
+		p := m.pending[sid]
+		delete(m.pending, sid)
+		m.mu.Unlock()
+		if p == nil {
+			writeJSON(w, map[string]any{"questionId": nil, "answer": nil})
+			return
+		}
+		writeJSON(w, p)
 	})
 
 	// Broadcaster + chat WebSocket endpoints.
@@ -235,6 +289,31 @@ func (m *MockServer) MetadataPosts() []SessionEvent {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]SessionEvent(nil), m.metadataPosts...)
+}
+
+// Requests returns a copy of every HTTP request the mock received.
+func (m *MockServer) Requests() []RequestRecord {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]RequestRecord(nil), m.requests...)
+}
+
+// RequestsWithPrefix returns recorded requests whose path starts with prefix.
+func (m *MockServer) RequestsWithPrefix(prefix string) []RequestRecord {
+	var out []RequestRecord
+	for _, r := range m.Requests() {
+		if strings.HasPrefix(r.Path, prefix) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// SetAskAnswer makes the mock answer every ask_question with answer (see askAnswer).
+func (m *MockServer) SetAskAnswer(answer string) {
+	m.mu.Lock()
+	m.askAnswer = answer
+	m.mu.Unlock()
 }
 
 // SetResumeState configures extra fields merged into the session-event response so the
