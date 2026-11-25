@@ -1260,10 +1260,9 @@ func runPaneWatch(done <-chan struct{}, sessionID, serverHost string, status *ty
 			strings.Contains(plain, "Paste code here") &&
 			strings.Contains(plain, "oauth/authorize") {
 
-			// Pull the URL out of the pane. URL is on its own line right after
-			// "Browser didn't open?" and may wrap across multiple lines on narrow panes.
-			oauthURLRe := regexp.MustCompile(`https?://[^\s]+oauth/authorize\?\S+`)
-			oauthURL := oauthURLRe.FindString(strings.ReplaceAll(plain, "\n", ""))
+			// Pull the URL out of the pane. The displayed copy is not the authoritative
+			// one — see extractOAuthURL.
+			oauthURL := extractOAuthURL(rendered, plain)
 			if oauthURL == "" {
 				// URL extraction failed — fall back to a generic message; user can copy from the pane.
 				logDebug("[broadcast] OAuth gate detected but URL extraction failed\n")
