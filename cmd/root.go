@@ -126,6 +126,13 @@ func Execute() {
 
 	p := tea.NewProgram(m, tea.WithoutRenderer(), tea.WithInput(nil))
 
+	// Let the answer poll end the session when a human kills the job from the board.
+	// Same path as the agent's own stop_broadcast, so the transcript and final metadata
+	// are flushed before the socket closes.
+	broadcast.EndSession = func(conclusion, message string) {
+		p.Send(types.ControlStopMsg{Conclusion: conclusion, Message: message})
+	}
+
 	// Start control server BEFORE tmux session so fkeybar can connect
 	ctrlListener, err := control.StartControlServer(status, p, stream.DoRestartClaude)
 	if err != nil {

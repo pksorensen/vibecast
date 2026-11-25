@@ -1392,6 +1392,13 @@ func runPaneWatch(done <-chan struct{}, sessionID, serverHost string, status *ty
 // send-keys (AskUserQuestion, alp_pane, onboarding_external and permission questions).
 // Answers to ask_question MCP-tool questions are handed to the waiting tool call instead.
 // The goroutine returns when done is closed.
+// EndSession ends the live session the way the agent's own stop_broadcast does.
+// cmd/root.go wires it to the TUI program; the answer loop needs it because a kill
+// arrives on the /pending-answer poll, and this package cannot reach
+// internal/control to post to the control socket — control imports this package.
+// Left nil, a kill is logged and ignored rather than typed into the pane.
+var EndSession func(conclusion, message string)
+
 func startAnswerLoop(done <-chan struct{}, sessionID, serverHost, paneId string, tmuxCmd func(args ...string) *exec.Cmd) {
 	// tmuxSend sends one or more keys to target and records a child OTEL span under parent.
 	// Keys are passed as individual arguments matching tmux send-keys semantics:
@@ -1660,6 +1667,24 @@ func startAnswerLoop(done <-chan struct{}, sessionID, serverHost, paneId string,
 				}
 				injectedQuestionIDs[qID] = true
 				logDebug("[answer] injecting answer %q for questionId=%s type=%s\n", answer, qID, r.QuestionType)
+
+				// A kill is not an answer. It must never reach the handlers below: their
+				// fallback maps every unrecognised questionType to "tool" and types the payload
+				// straight into the pane, so an unhandled kill would show up as the agent being
+				// sent the word "cancelled". Conclusion 'cancelled' is deliberate — the platform
+				// does not count it among STUCK_CONCLUSIONS, so the card follows the station's own
+				// transition rules instead of being shunted to blocked the way a timeout is.
+				if r.QuestionType == "kill" {
+					logDebug("[answer] kill requested for session=%s reason=%q\n", sessionID, answer)
+					if EndSession == nil {
+						// Nothing wired the stop path (library use, tests). Say so rather than
+						// letting the kill fall through to the injectors.
+						logDebug("[answer] kill ignored: no EndSession wired\n")
+						continue
+					}
+					EndSession("cancelled", answer)
+					return
+				}
 
 				injectCtx := context.Background()
 				_, injectSpan := telemetry.Tracer().Start(injectCtx, "vibecast.answer.inject",
