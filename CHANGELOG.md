@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.39](https://github.com/pksorensen/vibecast/compare/v0.1.38...v0.1.39) (2026-11-25)
+
+
+### Features
+
+* **broadcast:** end the session when the board asks for a kill ([90fa684](https://github.com/pksorensen/vibecast/commit/90fa6849971133b1e039268eb9ef667f9ea7d11a))
+
+
+### Bug Fixes
+
+* **broadcast:** read the OAuth URL from the hyperlink target, not the pane text ([3cdf9b2](https://github.com/pksorensen/vibecast/commit/3cdf9b2657dc8cdfceba9d767b26bbba4ebbb2a6))
+
 ## [0.1.38](https://github.com/pksorensen/vibecast/compare/v0.1.37...v0.1.38) (2026-11-20)
 
 
